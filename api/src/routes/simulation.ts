@@ -1175,6 +1175,28 @@ simulationRouter.post('/big-run', requireSimKey, async (req: Request, res: Respo
   }
 });
 
+// ─── POST /simulation/run-migrations ─────────────────────────────────────────
+// One-shot: applies any pending schema migrations needed for simulation features.
+// Safe to run multiple times (idempotent DDL).
+
+simulationRouter.post('/run-migrations', requireSimKey, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await query(`
+      ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS is_under_review    BOOLEAN NOT NULL DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS review_reason      TEXT,
+        ADD COLUMN IF NOT EXISTS review_started_at  TIMESTAMPTZ
+    `);
+    await query(`
+      CREATE INDEX IF NOT EXISTS idx_users_under_review
+        ON users (is_under_review) WHERE is_under_review = TRUE
+    `);
+    res.json({ ok: true, message: 'Migrations applied.' });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ─── GET /simulation/big-results ─────────────────────────────────────────────
 // Returns current state of big-sim users (re-reads from DB)
 

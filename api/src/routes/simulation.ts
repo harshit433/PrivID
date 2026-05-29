@@ -840,7 +840,7 @@ async function bulkInsertCalls(calls: RawCall[]): Promise<void> {
   const BATCH = 300;
   for (let i = 0; i < calls.length; i += BATCH) {
     const batch = calls.slice(i, i + BATCH);
-    const vals  = batch.map((_, j) => `($${j*5+1},$${j*5+2},'direct',$${j*5+3},$${j*5+4}::call_status,$${j*5+5})`).join(',');
+    const vals  = batch.map((_, j) => `($${j*5+1},$${j*5+2},'direct',$${j*5+3},$${j*5+4}::call_status,$${j*5+5},$${j*5+5})`).join(',');
     const args  = batch.flatMap(c => [c.caller_id, c.callee_id, crypto.randomBytes(8).toString('hex'), c.status, c.created_at]);
     await query(
       `INSERT INTO calls (caller_id,callee_id,call_type,webrtc_room_id,status,created_at,ended_at)
@@ -1170,8 +1170,9 @@ simulationRouter.post('/big-run', requireSimKey, async (req: Request, res: Respo
         ),
       },
     });
-  } catch (err) {
-    next(err);
+  } catch (err: any) {
+    // Return detailed error for simulation debugging
+    res.status(500).json({ ok: false, error: { code: 'BIG_RUN_ERROR', message: err?.message ?? String(err), stack: err?.stack?.split('\n').slice(0, 5) } });
   }
 });
 

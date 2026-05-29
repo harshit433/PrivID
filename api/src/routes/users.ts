@@ -5,7 +5,7 @@ import { query, queryOne, withTransaction } from '@privid/shared';
 import type { UserRow } from '@privid/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
-import { generateAvatarUploadUrl } from '../services/s3';
+import { generateAvatarUploadUrl, uploadAvatarBuffer } from '../services/s3';
 
 export const usersRouter = Router();
 
@@ -223,6 +223,40 @@ usersRouter.post('/lookup-by-phones', requireAuth, async (req: Request, res: Res
     );
 
     res.json({ ok: true, data: found.map(({ phone_hash: _ph, ...u }) => u) });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
+// ─── POST /users/me/avatar ────────────────────────────────────────────────────
+// Accepts the image as base64 in the JSON body.
+// Uploads to S3 if configured; otherwise stores as a data URL (dev fallback).
+// Updates users.avatar_url and returns the resolved URL.
+
+const avatarDirectSchema = z.object({
+  image_base64: z.string().min(1),
+  content_type: z.enum(['image/jpeg', 'image/png', 'image/webp']).default('image/jpeg'),
+});
+
+usersRouter.post('/me/avatar', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { image_base64, content_type } = avatarDirectSchema.parse(req.body);
+    const imageBuffer = Buffer.from(image_base64, 'base64');
+
+    // Sanity check: reject obviously non-image data (< 100 bytes or > 8 MB)
+    if (imageBuffer.length < 100 || imageBuffer.length > 8 * 1024 * 1024) {
+      throw new AppError(400, 'INVALID_IMAGE', 'Image must be between 100 bytes and 8 MB.');
+    }
+
+    const avatarUrl = await uploadAvatarBuffer(req.user!.sub, imageBuffer, content_type);
+
+    await query(
+      `UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE user_id = $2`,
+      [avatarUrl, req.user!.sub]
+    );
+
+    res.json({ ok: true, data: { avatar_url: avatarUrl } });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
     next(err);

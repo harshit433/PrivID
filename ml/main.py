@@ -483,7 +483,8 @@ def _run_training_pipeline(sim_runs: int, seed_start: int) -> None:
     try:
         # ── Step 1: generate training data via Railway sim ────────────────────
         t.log(f"Step 1/3: generating training data ({sim_runs} simulation runs)…")
-        data_dir = MODEL_DIR / "train_data"
+        # Use /tmp for training CSVs — no persistence needed, avoids volume permission issues
+        data_dir = Path("/tmp/privid_train_data")
         data_dir.mkdir(parents=True, exist_ok=True)
         csv_path = data_dir / "behavior_features.csv"
 

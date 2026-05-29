@@ -27,12 +27,7 @@ COPY . .
 # Create default model directory (overridden by Railway Volume at /data/models)
 RUN mkdir -p /app/models
 
-# Non-root user
-RUN useradd -m -u 1001 mluser \
- && chown -R mluser /app \
- && mkdir -p /data/models \
- && chown -R mluser /data
-USER mluser
+RUN mkdir -p /data/models
 
 ENV PORT=8001
 ENV MODEL_DIR=/data/models

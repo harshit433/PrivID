@@ -603,7 +603,7 @@ interface PersonaConfig {
 
 const PERSONA_CONFIGS: Record<PersonaType, PersonaConfig> = {
   normal_low: {
-    count: 25,
+    count: 30,
     factors: ['phone_verified'],
     base_score: 15,
     discovery: 'public',
@@ -625,7 +625,7 @@ const PERSONA_CONFIGS: Record<PersonaType, PersonaConfig> = {
     expected_under_review: false,
   },
   power_user: {
-    count: 15,
+    count: 20,
     factors: ['phone_verified', 'device_integrity', 'liveness_check', 'govt_id_verified'],
     base_score: 80,
     discovery: 'public',
@@ -680,7 +680,7 @@ const PERSONA_CONFIGS: Record<PersonaType, PersonaConfig> = {
     expected_under_review: true,
   },
   scammer: {
-    count: 20,
+    count: 25,
     factors: [],
     base_score: 0,
     discovery: 'public',
@@ -894,20 +894,45 @@ async function applyBulkScores(userIds: string[]): Promise<Map<string, number>> 
   return scoreMap;
 }
 
-async function triggerReviews(userIds: string[], reviewedSet: Set<string>): Promise<string[]> {
-  // Mark under review if score < 20 and not already
-  const rows = await query<{ user_id: string; trust_score: number }>(
-    `SELECT user_id, trust_score FROM users
-     WHERE user_id = ANY($1::uuid[]) AND trust_score < 20 AND is_under_review = FALSE`,
-    [userIds],
-  );
+async function triggerReviews(
+  userIds: string[],
+  reviewedSet: Set<string>,
+  prevScoreMap: Map<string, number>,
+): Promise<string[]> {
+  // Only flag users who:
+  //   (a) dropped below 20 from a previously >= 20 score (behavioral degradation), OR
+  //   (b) accumulated >= 2 mass_outreach_flags (confirmed spam pattern regardless of base score)
+  const [scoreRows, flagRows] = await Promise.all([
+    query<{ user_id: string; trust_score: number }>(
+      `SELECT user_id, trust_score FROM users
+       WHERE user_id = ANY($1::uuid[]) AND trust_score < 20 AND is_under_review = FALSE`,
+      [userIds],
+    ),
+    query<{ user_id: string; flag_count: string }>(
+      `SELECT user_id, COUNT(*) AS flag_count FROM behavior_events
+       WHERE user_id = ANY($1::uuid[]) AND event_type = 'mass_outreach_flag'
+       GROUP BY user_id HAVING COUNT(*) >= 2`,
+      [userIds],
+    ),
+  ]);
+
+  const behavioralFlagSet = new Set(flagRows.map(r => r.user_id));
   const newReviews: string[] = [];
-  for (const r of rows) {
+
+  for (const r of scoreRows) {
+    if (reviewedSet.has(r.user_id)) continue;
+    const prevScore = prevScoreMap.get(r.user_id) ?? r.trust_score;
+    const droppedBelow20 = prevScore >= 20 && r.trust_score < 20;
+    const hasSpamFlags  = behavioralFlagSet.has(r.user_id);
+    if (!droppedBelow20 && !hasSpamFlags) continue;
+
+    const reason = hasSpamFlags
+      ? `Mass outreach pattern detected (score ${r.trust_score}).`
+      : `Trust score dropped to ${r.trust_score} — automatic review triggered.`;
     await query(
-      `UPDATE users SET is_under_review = TRUE,
-        review_reason = $2, review_started_at = NOW()
+      `UPDATE users SET is_under_review = TRUE, review_reason = $2, review_started_at = NOW()
        WHERE user_id = $1`,
-      [r.user_id, `Trust score dropped to ${r.trust_score} — automatic review triggered.`],
+      [r.user_id, reason],
     );
     reviewedSet.add(r.user_id);
     newReviews.push(r.user_id);
@@ -1059,12 +1084,15 @@ simulationRouter.post('/big-run', requireSimKey, async (req: Request, res: Respo
     const reviewedIds = new Set<string>();
     const detectionDayMap = new Map<string, number>();
 
+    // Initial score map (base scores before any calls)
+    const day0ScoreMap = new Map(personas.map(p => [p.user_id, p.trust_score]));
+
     // ── Day 1 (T-72h to T-48h) ────────────────────────────────────────────
     const day1Calls = generateDayCalls(personas, rng, 60, reviewedIds);
     await bulkInsertCalls(day1Calls);
     const day1Flagged = await insertMassOutreachFlags(day1Calls, ago(54));
     const day1ScoreMap = await applyBulkScores(allIds);
-    const day1NewReviews = await triggerReviews(allIds, reviewedIds);
+    const day1NewReviews = await triggerReviews(allIds, reviewedIds, day0ScoreMap);
     for (const uid of day1NewReviews) detectionDayMap.set(uid, 1);
 
     // ── Day 2 (T-48h to T-24h) ────────────────────────────────────────────
@@ -1072,7 +1100,7 @@ simulationRouter.post('/big-run', requireSimKey, async (req: Request, res: Respo
     await bulkInsertCalls(day2Calls);
     const day2Flagged = await insertMassOutreachFlags(day2Calls, ago(30));
     const day2ScoreMap = await applyBulkScores(allIds);
-    const day2NewReviews = await triggerReviews(allIds, reviewedIds);
+    const day2NewReviews = await triggerReviews(allIds, reviewedIds, day1ScoreMap);
     for (const uid of day2NewReviews) if (!detectionDayMap.has(uid)) detectionDayMap.set(uid, 2);
 
     // ── Day 3 (T-24h to now) ──────────────────────────────────────────────
@@ -1080,7 +1108,7 @@ simulationRouter.post('/big-run', requireSimKey, async (req: Request, res: Respo
     await bulkInsertCalls(day3Calls);
     const day3Flagged = await insertMassOutreachFlags(day3Calls, ago(6));
     const finalScoreMap = await applyBulkScores(allIds);
-    const day3NewReviews = await triggerReviews(allIds, reviewedIds);
+    const day3NewReviews = await triggerReviews(allIds, reviewedIds, day2ScoreMap);
     for (const uid of day3NewReviews) if (!detectionDayMap.has(uid)) detectionDayMap.set(uid, 3);
 
     // ── Assemble per-user log ──────────────────────────────────────────────

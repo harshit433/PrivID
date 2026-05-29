@@ -236,8 +236,8 @@ export async function mlHealthCheck(): Promise<{
     const res = await fetch(`${ML_BASE}/health`, { signal: controller.signal });
     clearTimeout(timer);
     if (!res.ok) return { available: false, trained_models: 0, source: 'unavailable' };
-    const data = await res.json();
-    const trained = Object.values(data.models ?? {})
+    const data = await res.json() as Record<string, any>;
+    const trained = Object.values((data.models ?? {}) as Record<string, any>)
       .filter((m: any) => m.trained).length;
     return { available: true, trained_models: trained, source: 'ml-service' };
   } catch {

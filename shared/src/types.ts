@@ -24,6 +24,7 @@ export interface UserRow {
   phone_e164: string;
   handle: string;
   display_name: string | null;
+  avatar_url: string | null;
   trust_tier: TrustTier;
   trust_score: number;
   is_active: boolean;

@@ -111,7 +111,7 @@ def _reload_models() -> int:
     _models["block_intent"]  = BlockIntentClassifier(MODEL_DIR)
     _models["call_behavior"] = CallBehaviorClassifier(MODEL_DIR)
     _models["anomaly"]       = AnomalyDetector(MODEL_DIR)
-    # ensemble is stateless
+    _models["ensemble"]      = TrustScoreEnsemble()
     return sum(
         1 for name in ("block_intent", "call_behavior", "anomaly")
         if _models[name].is_trained()

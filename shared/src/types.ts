@@ -27,6 +27,7 @@ export interface UserRow {
   trust_tier: TrustTier;
   trust_score: number;
   is_active: boolean;
+  onboarding_complete: boolean;
   created_at: Date;
   updated_at: Date;
 }

@@ -48,6 +48,7 @@ async function issueAuthResponse(
           display_name: user.display_name,
           trust_tier: user.trust_tier,
           trust_score: user.trust_score,
+          onboarding_complete: user.onboarding_complete ?? false,
         },
       },
     },
@@ -209,6 +210,7 @@ authRouter.post('/register/verify', async (req: Request, res: Response, next: Ne
           display_name: user.display_name,
           trust_tier: user.trust_tier,
           trust_score: user.trust_score,
+          onboarding_complete: user.onboarding_complete ?? false,
         },
       },
     });
@@ -563,6 +565,23 @@ authRouter.post('/msg91/verify', async (req: Request, res: Response, next: NextF
     return res.status(statusCode).json(body);
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
+// ─── POST /auth/complete-onboarding ──────────────────────────────────────────
+// Called by SetupCompleteScreen once the user has finished the full setup flow.
+// Marks onboarding_complete = TRUE so future logins go straight to Main.
+
+authRouter.post('/complete-onboarding', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.user!.user_id;
+    await query(
+      `UPDATE users SET onboarding_complete = TRUE, updated_at = NOW() WHERE user_id = $1`,
+      [userId]
+    );
+    res.json({ ok: true, data: { onboarding_complete: true } });
+  } catch (err) {
     next(err);
   }
 });

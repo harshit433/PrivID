@@ -14,7 +14,7 @@ export const usersRouter = Router();
 usersRouter.get('/me', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const user = await queryOne<UserRow>(
-      `SELECT user_id, handle, display_name, avatar_url, trust_tier, trust_score, created_at
+      `SELECT user_id, handle, display_name, avatar_url, trust_tier, trust_score, onboarding_complete, created_at
        FROM users WHERE user_id = $1`,
       [req.user!.sub]
     );

@@ -246,7 +246,7 @@ def train_block_intent(df: pd.DataFrame, model_dir: Path) -> dict:
     pipeline = Pipeline([
         ("scaler", StandardScaler()),
         ("lr", LogisticRegression(
-            C=1.0, multi_class="multinomial",
+            C=1.0,
             solver="lbfgs", max_iter=1000,
             class_weight="balanced", random_state=42,
         )),

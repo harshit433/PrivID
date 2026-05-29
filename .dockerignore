@@ -1,0 +1,10 @@
+node_modules
+**/node_modules
+.git
+.gitignore
+**/.env
+!docker/api.env.example
+threedivi-sdk/**
+!threedivi-sdk/README.md
+*.md
+!threedivi-sdk/README.md

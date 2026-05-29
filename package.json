@@ -1,0 +1,28 @@
+{
+  "name": "privid-backend",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "api",
+    "signaling",
+    "worker",
+    "shared"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace=api\" \"npm run dev --workspace=signaling\" \"npm run dev --workspace=worker\"",
+    "dev:api": "npm run dev --workspace=api",
+    "dev:signaling": "npm run dev --workspace=signaling",
+    "dev:worker": "npm run dev --workspace=worker",
+    "db:migrate": "npm run migrate --workspace=api",
+    "db:seed": "npm run seed --workspace=api",
+    "db:reset": "npm run migrate:reset --workspace=api",
+    "build": "npm run build --workspaces",
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f api",
+    "docker:shell": "docker compose exec api sh"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

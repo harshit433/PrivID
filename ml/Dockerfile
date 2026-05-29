@@ -1,40 +1,45 @@
 # ── PrivID ML Service ─────────────────────────────────────────────────────────
-# Multi-stage build: keeps the final image lean by separating build deps
-# from the runtime image.
+# Deployed on Railway as a separate service pointing to backend/ml/ root dir.
+# Railway sets PORT automatically; uvicorn reads it from env.
 #
-# Railway sets PORT automatically; uvicorn reads it from the env.
+# Volume mount: /data/models  (persistent model storage across deploys)
+# Set MODEL_DIR=/data/models in Railway service env vars.
 # ─────────────────────────────────────────────────────────────────────────────
 
-FROM python:3.11-slim AS base
+FROM python:3.11-slim
 
-# System deps for lightgbm + onnxruntime
+# System deps: libgomp1 for LightGBM, gcc for building C extensions
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
+    gcc \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# ── Install Python deps ───────────────────────────────────────────────────────
-FROM base AS deps
+# Install Python deps first (cached layer — only invalidated when requirements change)
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt
 
-# ── Production image ──────────────────────────────────────────────────────────
-FROM deps AS runtime
+# Copy application code
 COPY . .
 
-# Create models directory (populated at first run / volume mount)
+# Create default model directory (overridden by Railway Volume at /data/models)
 RUN mkdir -p /app/models
 
-# Non-root user for security
-RUN useradd -m -u 1001 mluser && chown -R mluser /app
+# Non-root user
+RUN useradd -m -u 1001 mluser \
+ && chown -R mluser /app \
+ && mkdir -p /data/models \
+ && chown -R mluser /data
 USER mluser
 
-# Railway injects PORT; default 8001 for local dev
 ENV PORT=8001
-ENV MODEL_DIR=/app/models
+ENV MODEL_DIR=/data/models
 
 EXPOSE $PORT
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:$PORT/health')"
 
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT --workers 2"]

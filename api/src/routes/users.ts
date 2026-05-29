@@ -14,7 +14,7 @@ export const usersRouter = Router();
 usersRouter.get('/me', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const user = await queryOne<UserRow>(
-      `SELECT user_id, handle, display_name, avatar_url, trust_tier, trust_score, onboarding_complete, created_at
+      `SELECT user_id, handle, display_name, avatar_url, trust_tier, trust_score, onboarding_complete, discovery_mode, created_at
        FROM users WHERE user_id = $1`,
       [req.user!.sub]
     );
@@ -43,11 +43,12 @@ usersRouter.get('/me', requireAuth, async (req: Request, res: Response, next: Ne
 const updateSchema = z.object({
   display_name: z.string().min(1).max(60).optional(),
   avatar_url: z.string().url().optional(),
+  discovery_mode: z.enum(['public', 'private']).optional(),
 });
 
 usersRouter.patch('/me', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { display_name, avatar_url } = updateSchema.parse(req.body);
+    const { display_name, avatar_url, discovery_mode } = updateSchema.parse(req.body);
 
     const updates: string[] = [];
     const params: any[] = [];
@@ -55,12 +56,13 @@ usersRouter.patch('/me', requireAuth, async (req: Request, res: Response, next: 
 
     if (display_name !== undefined) { updates.push(`display_name = $${i++}`); params.push(display_name); }
     if (avatar_url !== undefined) { updates.push(`avatar_url = $${i++}`); params.push(avatar_url); }
+    if (discovery_mode !== undefined) { updates.push(`discovery_mode = $${i++}`); params.push(discovery_mode); }
 
     if (updates.length === 0) throw new AppError(400, 'NO_CHANGES', 'Nothing to update.');
 
     params.push(req.user!.sub);
     const [user] = await query<UserRow>(
-      `UPDATE users SET ${updates.join(', ')} WHERE user_id = $${i} RETURNING user_id, handle, display_name, avatar_url, trust_tier, trust_score`,
+      `UPDATE users SET ${updates.join(', ')} WHERE user_id = $${i} RETURNING user_id, handle, display_name, avatar_url, trust_tier, trust_score, discovery_mode`,
       params
     );
 
@@ -77,11 +79,18 @@ usersRouter.get('/search', requireAuth, async (req: Request, res: Response, next
   try {
     const q = z.string().min(2).parse(req.query.q);
     const users = await query<Partial<UserRow>>(
-      `SELECT user_id, handle, display_name, trust_tier, trust_score
-       FROM users
-       WHERE (handle ILIKE $1 OR display_name ILIKE $1)
-         AND user_id != $2
-         AND is_active = TRUE
+      `SELECT u.user_id, u.handle, u.display_name, u.trust_tier, u.trust_score
+       FROM users u
+       WHERE (u.handle ILIKE $1 OR u.display_name ILIKE $1)
+         AND u.user_id != $2
+         AND u.is_active = TRUE
+         AND (
+           u.discovery_mode = 'public'
+           OR EXISTS (
+             SELECT 1 FROM connections c
+             WHERE c.owner_id = $2 AND c.contact_id = u.user_id
+           )
+         )
        LIMIT 20`,
       [`%${q}%`, req.user!.sub]
     );

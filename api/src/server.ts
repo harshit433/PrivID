@@ -10,6 +10,7 @@ import { connectionsRouter } from './routes/connections';
 import { callsRouter } from './routes/calls';
 import { channelsRouter } from './routes/channels';
 import { trustRouter } from './routes/trust';
+import { simulationRouter } from './routes/simulation';
 import { errorHandler } from './middleware/errorHandler';
 import { apiLimiter, publicLimiter } from './middleware/rateLimit';
 import { getPool } from '@privid/shared';
@@ -48,6 +49,7 @@ app.use('/connections', apiLimiter, connectionsRouter);
 app.use('/calls', apiLimiter, callsRouter);
 app.use('/channels', apiLimiter, channelsRouter);
 app.use('/trust', apiLimiter, trustRouter);
+app.use('/simulation', simulationRouter);
 
 // ─── Error handler ────────────────────────────────────────────────────────────
 app.use(errorHandler);

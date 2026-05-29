@@ -79,12 +79,23 @@ callsRouter.post('/initiate', requireAuth, callLimiter, async (req: Request, res
 
       // Check caller's permission from callee's perspective
       // Check callee's connection record for the caller (direct calls only)
-      const calleeConn = await queryOne<ConnectionRow>(
-        `SELECT * FROM connections WHERE owner_id = $1 AND contact_id = $2`,
-        [calleeId, callerId],
-      );
+      const [calleeConn, calleeUser] = await Promise.all([
+        queryOne<ConnectionRow>(
+          `SELECT * FROM connections WHERE owner_id = $1 AND contact_id = $2`,
+          [calleeId, callerId],
+        ),
+        queryOne<{ discovery_mode: string }>(
+          `SELECT discovery_mode FROM users WHERE user_id = $1`,
+          [calleeId],
+        ),
+      ]);
 
       const connType = calleeConn?.connection_type ?? 'unknown';
+
+      // Private mode — only trusted/temporary connections can call
+      if (calleeUser?.discovery_mode === 'private' && connType === 'unknown') {
+        throw new AppError(403, 'DISCOVERY_PRIVATE', 'This person is not accepting calls from unknown contacts.');
+      }
 
       // Hard block
       if (connType === 'blocked') {
@@ -293,11 +304,12 @@ callsRouter.get('/pending', requireAuth, async (req: Request, res: Response, nex
     const rows = await query(
       `SELECT
          c.call_id, c.call_type, c.status, c.created_at, c.webrtc_room_id,
-         caller.user_id     AS caller_user_id,
-         caller.handle      AS caller_handle,
+         caller.user_id      AS caller_user_id,
+         caller.handle       AS caller_handle,
          caller.display_name AS caller_name,
-         caller.trust_tier  AS trust_tier,
-         caller.trust_score AS trust_score,
+         caller.trust_tier   AS trust_tier,
+         caller.trust_score  AS trust_score,
+         caller.avatar_url   AS caller_avatar_url,
          conn.connection_type
        FROM calls c
        JOIN users caller ON caller.user_id = c.caller_id

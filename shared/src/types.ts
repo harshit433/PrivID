@@ -28,6 +28,7 @@ export interface UserRow {
   trust_score: number;
   is_active: boolean;
   onboarding_complete: boolean;
+  discovery_mode: 'public' | 'private';
   created_at: Date;
   updated_at: Date;
 }

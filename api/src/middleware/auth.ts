@@ -9,8 +9,13 @@ let publicKey: string | null = null;
 
 function getPublicKey(): string {
   if (!publicKey) {
-    const keyPath = process.env.JWT_PUBLIC_KEY_PATH ?? './keys/public.pem';
-    publicKey = fs.readFileSync(path.resolve(keyPath), 'utf8');
+    // Prefer base64-encoded env var (Railway/cloud) over file path
+    if (process.env.JWT_PUBLIC_KEY_B64) {
+      publicKey = Buffer.from(process.env.JWT_PUBLIC_KEY_B64, 'base64').toString('utf8');
+    } else {
+      const keyPath = process.env.JWT_PUBLIC_KEY_PATH ?? './keys/public.pem';
+      publicKey = fs.readFileSync(path.resolve(keyPath), 'utf8');
+    }
   }
   return publicKey;
 }

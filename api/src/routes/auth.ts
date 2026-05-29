@@ -59,8 +59,13 @@ async function issueAuthResponse(
 let _privateKey: string | null = null;
 function getPrivateKey(): string {
   if (!_privateKey) {
-    const p = process.env.JWT_PRIVATE_KEY_PATH ?? './keys/private.pem';
-    _privateKey = fs.readFileSync(path.resolve(p), 'utf8');
+    // Prefer base64-encoded env var (Railway/cloud) over file path
+    if (process.env.JWT_PRIVATE_KEY_B64) {
+      _privateKey = Buffer.from(process.env.JWT_PRIVATE_KEY_B64, 'base64').toString('utf8');
+    } else {
+      const p = process.env.JWT_PRIVATE_KEY_PATH ?? './keys/private.pem';
+      _privateKey = fs.readFileSync(path.resolve(p), 'utf8');
+    }
   }
   return _privateKey;
 }

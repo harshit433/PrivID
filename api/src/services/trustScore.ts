@@ -28,6 +28,9 @@
 
 import { query, queryOne, withTransaction } from '@privid/shared';
 import type { TrustTier, UserRow } from '@privid/shared';
+import { extractBlockContext, extractFeatures } from './featureStore';
+import { classifyBlockIntent, blockPenaltyPts } from './blockIntent';
+import { mlScoreUser } from './mlClient';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -95,12 +98,20 @@ async function getNetworkTrustScore(userId: string): Promise<number> {
   return avg ? Math.min(10, Math.round((avg / 70) * 10)) : 0;
 }
 
-// ─── Behavioral penalty (static signals) ─────────────────────────────────────
+// ─── Behavioral penalty (intent-aware) ────────────────────────────────────────
+//
+// Replaces the flat "-3 per block" formula with Block Intent Classification:
+//   personal_dispute  → weight ≈ 0.1  (−0.3 pts)
+//   spam_block        → weight = 1.0  (−3.0 pts, same as before)
+//   harassment_block  → weight = 2.5  (−7.5 pts)
+//
+// Blocks from promiscuous blockers (high callee_block_propensity) are
+// discounted further because their block signal is noisy.
 
 async function getStaticBehaviorPenalty(userId: string): Promise<number> {
-  const [blocks, flags] = await Promise.all([
-    query<{ count: string }>(
-      `SELECT COUNT(*) as count FROM connections
+  const [blockRows, flags] = await Promise.all([
+    query<{ owner_id: string }>(
+      `SELECT owner_id FROM connections
        WHERE contact_id = $1 AND connection_type = 'blocked'
          AND updated_at > NOW() - INTERVAL '30 days'`,
       [userId],
@@ -112,8 +123,21 @@ async function getStaticBehaviorPenalty(userId: string): Promise<number> {
       [userId],
     ),
   ]);
-  const blockPenalty   = Math.min(15, parseInt(blocks[0].count)  * 3);
-  const outreachPenalty = Math.min(10, parseInt(flags[0].count)  * 5);
+
+  // Classify each block independently, accumulate weighted penalty
+  let blockPenalty = 0;
+  for (const row of blockRows) {
+    try {
+      const ctx    = await extractBlockContext(row.owner_id, userId);
+      const intent = classifyBlockIntent(ctx);
+      blockPenalty += blockPenaltyPts(intent);
+    } catch {
+      blockPenalty += 3; // fallback to old flat penalty on error
+    }
+  }
+  blockPenalty = Math.min(15, blockPenalty);
+
+  const outreachPenalty = Math.min(10, parseInt(flags[0].count) * 5);
   return blockPenalty + outreachPenalty;
 }
 
@@ -212,6 +236,14 @@ export interface TrustBreakdown {
     network_trust: number;
     behavior_modifier: number;
     call_freq_penalty: number;
+    ml_delta: number;
+  };
+  ml?: {
+    persona_prediction: string;
+    confidence: number;
+    flags: string[];
+    model_agreement: number;
+    override_review: boolean;
   };
 }
 
@@ -227,7 +259,8 @@ export async function computeTrustScore(userId: string): Promise<TrustBreakdown>
 
   const totalPenalty = Math.min(40, staticPenalty + freqPenalty);
 
-  const factors = {
+  // ── Rule-based score ───────────────────────────────────────────────────────
+  const ruleFactors = {
     phone_verified:    completed.has('phone_verified')   ? 15 : 0,
     device_integrity:  completed.has('device_integrity') ? 10 : 0,
     liveness_check:    completed.has('liveness_check')   ? 25 : 0,
@@ -239,13 +272,40 @@ export async function computeTrustScore(userId: string): Promise<TrustBreakdown>
     call_freq_penalty: -(freqPenalty),
   };
 
-  const raw = (
-    factors.phone_verified + factors.device_integrity + factors.liveness_check +
-    factors.govt_id_verified + factors.profile_complete + factors.account_age +
-    factors.network_trust - totalPenalty
+  const ruleRaw = (
+    ruleFactors.phone_verified + ruleFactors.device_integrity + ruleFactors.liveness_check +
+    ruleFactors.govt_id_verified + ruleFactors.profile_complete + ruleFactors.account_age +
+    ruleFactors.network_trust - totalPenalty
   );
+
+  // ── ML delta (fail-open: 0 if service unavailable) ─────────────────────────
+  let mlDelta = 0;
+  let mlResult: TrustBreakdown['ml'] | undefined;
+
+  try {
+    const userFeatures = await extractFeatures(userId);
+    const ml = await mlScoreUser(userFeatures);
+    mlDelta   = ml.ml_score_delta;
+    mlResult  = {
+      persona_prediction: ml.persona_prediction,
+      confidence:         ml.confidence,
+      flags:              ml.ml_flags,
+      model_agreement:    ml.model_agreement,
+      override_review:    ml.override_review,
+    };
+  } catch {
+    // ML service down — rule-based score stands alone
+  }
+
+  const raw   = ruleRaw + mlDelta;
   const total = Math.max(0, Math.min(100, raw));
-  return { total, tier: scoreToTier(total), factors };
+
+  const factors = {
+    ...ruleFactors,
+    ml_delta: mlDelta,
+  };
+
+  return { total, tier: scoreToTier(total), factors, ml: mlResult };
 }
 
 // ─── Bulk compute for simulation (single SQL, no per-user queries) ───────────
@@ -366,14 +426,21 @@ export async function recomputeAndPersist(userId: string): Promise<TrustBreakdow
     }
 
     // Auto-review: score crosses below 20 for the first time
-    if (
+    const mlOverride = breakdown.ml?.override_review ?? false;
+    const scoreDropped = (
       breakdown.total < REVIEW_THRESHOLD &&
-      current.trust_score >= REVIEW_THRESHOLD &&
-      !current.is_under_review
-    ) {
-      const reason = breakdown.factors.call_freq_penalty < -5
-        ? `Score dropped to ${breakdown.total} — abnormal call frequency pattern detected.`
-        : `Score dropped to ${breakdown.total} — multiple blocks and/or outreach flags.`;
+      current.trust_score >= REVIEW_THRESHOLD
+    );
+
+    if (!current.is_under_review && (scoreDropped || mlOverride)) {
+      let reason: string;
+      if (mlOverride && breakdown.ml) {
+        reason = `ML consensus review: ${breakdown.ml.persona_prediction} detected with ${(breakdown.ml.confidence * 100).toFixed(0)}% confidence. Flags: ${breakdown.ml.flags.slice(0, 2).join('; ')}.`;
+      } else if (breakdown.factors.call_freq_penalty < -5) {
+        reason = `Score dropped to ${breakdown.total} — abnormal call frequency pattern detected.`;
+      } else {
+        reason = `Score dropped to ${breakdown.total} — multiple blocks and/or outreach flags.`;
+      }
       await client.query(
         `UPDATE users SET is_under_review = true, review_reason = $1, review_started_at = NOW()
          WHERE user_id = $2`,

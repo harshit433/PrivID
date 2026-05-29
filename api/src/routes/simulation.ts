@@ -330,8 +330,8 @@ simulationRouter.post('/setup', requireSimKey, async (_req: Request, res: Respon
       { owner: 'sim_alice', contact: 'sim_frank', type: 'blocked' },
       // Carol blocks Frank (after Day 2)
       { owner: 'sim_carol', contact: 'sim_frank', type: 'blocked' },
-      // Dave blocks Frank (after Day 2)
-      { owner: 'sim_dave',  contact: 'sim_frank', type: 'blocked' },
+      // Dave is passive — he misses Frank's calls but doesn't bother blocking
+      // (This lets the cooldown demo remain visible for Frank → Dave)
       // Alice blocks Gary (after 4th harassment call)
       { owner: 'sim_alice', contact: 'sim_gary',  type: 'blocked' },
     ] as const;

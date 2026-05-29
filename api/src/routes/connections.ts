@@ -25,9 +25,13 @@ connectionsRouter.get('/', requireAuth, async (req: Request, res: Response, next
          COALESCE(NULLIF(TRIM(c.contact_name), ''), u.display_name) AS display_name,
          u.avatar_url,
          u.trust_tier,
-         u.trust_score
+         u.trust_score,
+         COALESCE(r.connection_type, 'unknown') AS reverse_connection_type,
+         r.daily_call_limit AS reverse_daily_call_limit,
+         r.temporary_expires_at AS reverse_temporary_expires_at
        FROM connections c
        JOIN users u ON u.user_id = c.contact_id
+       LEFT JOIN connections r ON r.owner_id = c.contact_id AND r.contact_id = c.owner_id
        WHERE c.owner_id = $1
          ${typeFilter ? 'AND c.connection_type = $2' : ''}
        ORDER BY COALESCE(NULLIF(TRIM(c.contact_name), ''), u.display_name) ASC`,

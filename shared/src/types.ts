@@ -29,6 +29,9 @@ export interface UserRow {
   is_active: boolean;
   onboarding_complete: boolean;
   discovery_mode: 'public' | 'private';
+  is_under_review: boolean;
+  review_reason: string | null;
+  review_started_at: Date | null;
   created_at: Date;
   updated_at: Date;
 }

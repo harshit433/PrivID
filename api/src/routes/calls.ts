@@ -77,6 +77,16 @@ callsRouter.post('/initiate', requireAuth, callLimiter, async (req: Request, res
     } else {
       calleeId = body.callee_id!;
 
+      // Block callers whose trust score has dropped below the review threshold
+      const callerStatus = await queryOne<{ is_under_review: boolean }>(
+        `SELECT is_under_review FROM users WHERE user_id = $1`,
+        [callerId],
+      );
+      if (callerStatus?.is_under_review) {
+        throw new AppError(403, 'ACCOUNT_UNDER_REVIEW',
+          'Your account is under review. You cannot initiate new calls until the review is resolved.');
+      }
+
       // Check caller's permission from callee's perspective
       // Check callee's connection record for the caller (direct calls only)
       const [calleeConn, calleeUser] = await Promise.all([

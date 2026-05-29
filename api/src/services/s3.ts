@@ -39,30 +39,36 @@ export async function generateAvatarUploadUrl(
 
 /**
  * Upload image Buffer directly to S3 (server-side, no presigned URL needed).
- * Falls back to returning a data URL if S3 is not configured.
+ * Falls back to a data URL if S3 is not configured OR if the upload fails,
+ * so photo upload always works regardless of cloud storage setup.
  */
 export async function uploadAvatarBuffer(
   userId: string,
   imageBuffer: Buffer,
   contentType: string,
 ): Promise<string> {
-  if (!isS3Configured()) {
-    // Fallback: store as data URL in the DB (suitable for dev/testing)
-    const b64 = imageBuffer.toString('base64');
-    return `data:${contentType};base64,${b64}`;
+  if (isS3Configured()) {
+    const region = process.env.AWS_REGION!;
+    const bucket = process.env.AWS_S3_BUCKET!;
+    const ext = contentType === 'image/png' ? 'png' : contentType === 'image/webp' ? 'webp' : 'jpg';
+    const key = `avatars/${userId}/${Date.now()}.${ext}`;
+
+    try {
+      await getS3Client().send(new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        Body: imageBuffer,
+        ContentType: contentType,
+      }));
+      return `https://${bucket}.s3.${region}.amazonaws.com/${key}`;
+    } catch (s3Err) {
+      // Log but don't surface to client — fall through to data URL fallback
+      console.warn('[S3] Avatar upload failed, using data URL fallback:', (s3Err as Error).message);
+    }
   }
 
-  const region = process.env.AWS_REGION!;
-  const bucket = process.env.AWS_S3_BUCKET!;
-  const ext = contentType === 'image/png' ? 'png' : contentType === 'image/webp' ? 'webp' : 'jpg';
-  const key = `avatars/${userId}/${Date.now()}.${ext}`;
-
-  await getS3Client().send(new PutObjectCommand({
-    Bucket: bucket,
-    Key: key,
-    Body: imageBuffer,
-    ContentType: contentType,
-  }));
-
-  return `https://${bucket}.s3.${region}.amazonaws.com/${key}`;
+  // Fallback: store as inline data URL.
+  // Works fine in dev / when S3 isn't configured or fails.
+  const b64 = imageBuffer.toString('base64');
+  return `data:${contentType};base64,${b64}`;
 }

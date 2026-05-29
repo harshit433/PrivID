@@ -569,14 +569,15 @@ def _generate_training_data(sim_runs: int, seed_start: int, out_path: Path) -> N
                     timeout=120.0,
                 )
                 resp.raise_for_status()
-                data = resp.json()
+                body = resp.json()
             except Exception as e:
                 t.log(f"    ⚠ run {i+1} failed: {e} — skipping")
                 continue
 
-            persona_summaries = data.get("persona_summaries", [])
-            for ps in persona_summaries:
-                row = _persona_summary_to_features(ps, seed)
+            # Response shape: { ok, data: { meta, summary, validation, user_logs, persona_summary } }
+            user_logs = body.get("data", {}).get("user_logs", [])
+            for ul in user_logs:
+                row = _user_log_to_features(ul, seed)
                 if row:
                     all_rows.append(row)
 
@@ -591,72 +592,75 @@ def _generate_training_data(sim_runs: int, seed_start: int, out_path: Path) -> N
     t.log(f"  Collected {len(df)} feature rows from {sim_runs} sim runs")
 
 
-def _persona_summary_to_features(ps: dict, seed: int) -> Optional[dict]:
-    """Convert a persona_summary from big-run into a training feature row."""
-    ptype = ps.get("persona_type")
+def _user_log_to_features(ul: dict, seed: int) -> Optional[dict]:
+    """
+    Convert a user_log entry from big-run into a training feature row.
+
+    user_log shape: {
+      user_id, handle, name, persona_type,
+      day0_score, day1_score, day2_score, day3_score,
+      is_under_review, detected_on_day
+    }
+    """
+    ptype = ul.get("persona_type")
     if not ptype:
         return None
 
-    # Extract the numeric signals from the persona summary
-    # These map to our BEHAVIOR_MODEL_FEATURES feature names
-    score_d3  = ps.get("final_score", 50)
-    score_d0  = ps.get("initial_score", 50)
-    score_d1  = ps.get("day1_score",    score_d0)
-    score_d2  = ps.get("day2_score",    score_d1)
+    score_d0 = float(ul.get("day0_score", 50))
+    score_d1 = float(ul.get("day1_score", score_d0))
+    score_d2 = float(ul.get("day2_score", score_d1))
+    score_d3 = float(ul.get("day3_score", score_d2))
 
-    logs = ps.get("logs", [])
-
-    # Count events from logs
-    calls_out = sum(1 for l in logs if "→" in l)
-    calls_in  = sum(1 for l in logs if "←" in l)
-    blocks    = sum(1 for l in logs if "block" in l.lower())
-    flags     = sum(1 for l in logs if "outreach_flag" in l.lower())
-    answered  = sum(1 for l in logs if "answered" in l.lower())
+    # Derive behavioral features from persona type + score trajectory
+    # These approximate what the feature extractor would compute from real DB data
+    score_drop = score_d0 - score_d3
+    is_bad     = ptype in ("mass_spammer", "scammer", "harasser", "reformed", "sleeper")
+    is_normal  = ptype in ("normal_low", "normal_high", "power_user", "private_safe", "passive")
 
     return {
         "persona_type":             ptype,
         "seed":                     seed,
-        # Volume
-        "calls_out_1d":             calls_out / 3,
-        "calls_out_7d":             calls_out,
-        "calls_out_30d":            calls_out * 3,
-        "calls_in_1d":              calls_in / 3,
-        "calls_in_7d":              calls_in,
-        "calls_in_30d":             calls_in * 3,
-        "unique_callees_1d":        max(1, calls_out / 3),
-        "unique_callees_7d":        max(1, calls_out * 0.7),
-        "unique_callees_30d":       max(1, calls_out * 1.5),
-        "unique_callers_7d":        max(1, calls_in * 0.8),
-        "calls_per_unique_callee_1d": max(1, (calls_out / 3) / max(1, calls_out / 3)),
-        "new_targets_1d":           max(0, calls_out / 4),
+        # Volume — bad actors dial far more unique targets
+        "calls_out_1d":             25 if ptype == "mass_spammer" else (15 if ptype in ("scammer","harasser") else 3),
+        "calls_out_7d":             80 if ptype == "mass_spammer" else (50 if ptype in ("scammer","harasser") else 15),
+        "calls_out_30d":            300 if ptype == "mass_spammer" else (180 if ptype in ("scammer","harasser") else 50),
+        "calls_in_1d":              1 if is_bad else 5,
+        "calls_in_7d":              5 if is_bad else 20,
+        "calls_in_30d":             15 if is_bad else 70,
+        "unique_callees_1d":        20 if ptype == "mass_spammer" else (10 if ptype == "scammer" else 2),
+        "unique_callees_7d":        60 if ptype == "mass_spammer" else (30 if ptype == "scammer" else 8),
+        "unique_callees_30d":       200 if ptype == "mass_spammer" else (100 if ptype == "scammer" else 25),
+        "unique_callers_7d":        2 if is_bad else 10,
+        "calls_per_unique_callee_1d": 1.2 if is_bad else 2.5,
+        "new_targets_1d":           18 if ptype == "mass_spammer" else (8 if ptype == "scammer" else 1),
         # Quality
-        "answer_rate_out_1d":       answered / max(1, calls_out),
-        "answer_rate_out_7d":       answered / max(1, calls_out),
-        "answer_rate_in_1d":        0.8,
-        "answer_rate_in_7d":        0.8,
-        "avg_call_duration_7d":     120 if ptype in ("normal_low","normal_high","power_user") else 20,
-        "pct_calls_under_30s_7d":   0.8 if ptype in ("mass_spammer","scammer") else 0.1,
-        "reciprocal_rate_30d":      0.5 if ptype in ("normal_low","normal_high","personal_blocker") else 0.0,
-        "calls_to_trusted_ratio_7d": 0.7 if ptype in ("normal_low","normal_high","power_user") else 0.1,
+        "answer_rate_out_1d":       0.05 if ptype in ("mass_spammer","scammer") else (0.5 if ptype == "harasser" else 0.75),
+        "answer_rate_out_7d":       0.05 if ptype in ("mass_spammer","scammer") else (0.4 if ptype == "harasser" else 0.72),
+        "answer_rate_in_1d":        0.9 if is_normal else 0.3,
+        "answer_rate_in_7d":        0.85 if is_normal else 0.3,
+        "avg_call_duration_7d":     15 if ptype in ("mass_spammer","scammer") else (45 if ptype == "harasser" else 180),
+        "pct_calls_under_30s_7d":   0.85 if ptype in ("mass_spammer","scammer") else (0.4 if ptype == "harasser" else 0.05),
+        "reciprocal_rate_30d":      0.02 if is_bad else 0.55,
+        "calls_to_trusted_ratio_7d": 0.05 if is_bad else (0.8 if ptype in ("normal_high","power_user") else 0.5),
         # Behavioral
-        "unknown_call_ratio_7d":    0.8 if ptype in ("mass_spammer","scammer") else 0.1,
-        "burst_count_7d":           5 if ptype in ("mass_spammer","harasser") else 0,
-        "burst_acceleration":       1.5 if ptype in ("mass_spammer","scammer") else 0,
-        "repeat_call_rate_7d":      0.6 if ptype == "harasser" else 0.1,
-        "sequential_dialing_max":   8 if ptype == "mass_spammer" else 1,
-        "first_contact_ghost_ratio_30d": 0.7 if ptype in ("mass_spammer","scammer") else 0.1,
-        "consistent_ignorer_count_30d": blocks * 2 if ptype == "harasser" else 0,
-        # Network
-        "trusted_contacts_count":   10 if ptype in ("normal_high","power_user") else 2,
-        "blocked_by_7d":            blocks,
-        "blocked_by_30d":           blocks * 3,
-        "block_trusted_ratio":      blocks / max(1, 10),
-        "avg_trust_of_network":     70 if ptype in ("normal_high","power_user") else 40,
-        "shared_targets_with_flagged": 3 if ptype in ("mass_spammer","scammer") else 0,
+        "unknown_call_ratio_7d":    0.92 if ptype in ("mass_spammer","scammer") else (0.7 if ptype == "harasser" else 0.1),
+        "burst_count_7d":           6 if ptype in ("mass_spammer","harasser") else (2 if ptype == "scammer" else 0),
+        "burst_acceleration":       1.8 if ptype == "mass_spammer" else (1.2 if ptype == "scammer" else 0),
+        "repeat_call_rate_7d":      0.15 if ptype == "mass_spammer" else (0.7 if ptype == "harasser" else 0.1),
+        "sequential_dialing_max":   10 if ptype == "mass_spammer" else (4 if ptype == "scammer" else 1),
+        "first_contact_ghost_ratio_30d": 0.8 if ptype in ("mass_spammer","scammer") else (0.3 if ptype == "harasser" else 0.05),
+        "consistent_ignorer_count_30d": 1 if ptype == "mass_spammer" else (5 if ptype == "harasser" else 0),
+        # Network — bad actors get blocked more
+        "trusted_contacts_count":   1 if is_bad else (15 if ptype in ("normal_high","power_user") else 5),
+        "blocked_by_7d":            max(0, round(score_drop / 3)) if is_bad else 0,
+        "blocked_by_30d":           max(0, round(score_drop)) if is_bad else 0,
+        "block_trusted_ratio":      0.5 if is_bad else 0.02,
+        "avg_trust_of_network":     35 if is_bad else (72 if ptype in ("normal_high","power_user") else 55),
+        "shared_targets_with_flagged": 4 if ptype in ("mass_spammer","scammer") else 0,
         # Labels
         "final_score":              score_d3,
         "initial_score":            score_d0,
-        "is_under_review":          ps.get("is_under_review", False),
+        "is_under_review":          ul.get("is_under_review", False),
     }
 
 

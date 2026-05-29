@@ -11,6 +11,26 @@ import { AccessToken } from 'livekit-server-sdk';
 
 export const callsRouter = Router();
 
+// ─── Dynamic cooldown helper ──────────────────────────────────────────────────
+// Cooldown escalates with consecutive unanswered calls; resets when answered.
+//   0 previous / last answered → 0 ms
+//   1 unanswered               → 5 min
+//   2 consecutive unanswered   → 20 min
+//   3+ consecutive unanswered  → 2 hr
+function dynamicCooldownMs(calls: Array<{ status: string }>): number {
+  if (calls.length === 0) return 0;
+  const last = calls[0];
+  if (last.status === 'answered' || last.status === 'ended') return 0;
+  let consecutive = 0;
+  for (const c of calls) {
+    if (c.status === 'answered' || c.status === 'ended') break;
+    consecutive++;
+  }
+  if (consecutive === 1) return 5 * 60 * 1000;
+  if (consecutive === 2) return 20 * 60 * 1000;
+  return 2 * 60 * 60 * 1000;
+}
+
 // ─── POST /calls/initiate ─────────────────────────────────────────────────────
 
 const initiateSchema = z.object({
@@ -94,24 +114,23 @@ callsRouter.post('/initiate', requireAuth, callLimiter, async (req: Request, res
           throw new AppError(429, 'DAILY_LIMIT_REACHED', 'Daily call limit reached for this contact. Try again tomorrow.');
         }
 
-        // Unknown — 2-hour cooldown between attempts
+        // Unknown — dynamic cooldown based on answer history
         if (connType === 'unknown') {
-          const lastCall = await queryOne<{ created_at: string }>(
-            `SELECT created_at FROM calls
+          const recentCalls = await query<{ status: string; created_at: string }>(
+            `SELECT status, created_at FROM calls
              WHERE caller_id = $1 AND callee_id = $2
-             ORDER BY created_at DESC LIMIT 1`,
+             ORDER BY created_at DESC LIMIT 5`,
             [callerId, calleeId],
           );
-          if (lastCall) {
-            const cooldownMs = 2 * 60 * 60 * 1000;
-            const elapsed = Date.now() - new Date(lastCall.created_at).getTime();
+          const cooldownMs = dynamicCooldownMs(recentCalls);
+          if (recentCalls.length > 0 && cooldownMs > 0) {
+            const elapsed = Date.now() - new Date(recentCalls[0].created_at).getTime();
             if (elapsed < cooldownMs) {
-              const waitMin = Math.ceil((cooldownMs - elapsed) / 60000);
-              throw new AppError(
-                429,
-                'COOLDOWN_ACTIVE',
-                `Please wait ${waitMin} more minute${waitMin === 1 ? '' : 's'} before calling again.`,
-              );
+              const remainSec = Math.ceil((cooldownMs - elapsed) / 1000);
+              const msg = remainSec < 90
+                ? `Please wait ${remainSec} more second${remainSec === 1 ? '' : 's'} before calling again.`
+                : `Please wait ${Math.ceil(remainSec / 60)} more minute${Math.ceil(remainSec / 60) === 1 ? '' : 's'} before calling again.`;
+              throw new AppError(429, 'COOLDOWN_ACTIVE', msg);
             }
           }
         }

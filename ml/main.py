@@ -565,8 +565,7 @@ def _generate_training_data(sim_runs: int, seed_start: int, out_path: Path) -> N
             try:
                 resp = client.post(
                     f"{SIM_API_URL}/simulation/big-run",
-                    json={"seed": seed},
-                    headers={"X-Simulation-Key": SIM_API_KEY},
+                    json={"seed": seed, "sim_key": SIM_API_KEY},
                     timeout=120.0,
                 )
                 resp.raise_for_status()

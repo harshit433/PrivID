@@ -1,5 +1,5 @@
 /**
- * PrivID Trust Score Engine — v2
+ * PrivID Trust Score Engine — v3 (Pure ML)
  *
  * Score range: 0 – 100
  * Tier thresholds:
@@ -8,40 +8,47 @@
  *   verified   50 – 79
  *   premium    80 – 100
  *
- * Factor weights (max contribution):
- *   phone_verified      +15   (gate factor)
- *   device_integrity    +10
- *   liveness_check      +25
- *   govt_id_verified    +30
- *   profile_complete    +5
- *   account_age         +5    (max after 180 days)
- *   network_trust       +10   (avg trust of trusted connections)
+ * Architecture:
+ *   Verification factors (objective, deterministic):
+ *     phone_verified      +15
+ *     device_integrity    +10
+ *     liveness_check      +25
+ *     govt_id_verified    +30
+ *     profile_complete    +5
+ *     account_age         +5   (max after 180 days)
+ *     ─────────────────────────
+ *     max verification    +90
  *
- * Penalties (combined cap = -40):
- *   blocks_received     -3 each (cap -15, 30-day window)
- *   mass_outreach_flags -5 each (cap -10, 30-day window)
- *   call_freq_penalty   -20 max  (situational, frequency + velocity + unanswered rate)
+ *   ML behavioral modifier (Python ensemble service):
+ *     CallBehaviorClassifier + AnomalyDetector + TrustScoreEnsemble
+ *     range: [-40, +10]
  *
- * Auto-review: score < 20 AND declining → is_under_review = true
- * Callers under review cannot initiate calls to unknown contacts.
+ *   final = clamp(verification_pts + ml_modifier, 0, 100)
+ *
+ * All rule-based behavioral penalties (block counting, frequency bands,
+ * outreach flags, network trust) have been removed. The ML ensemble
+ * handles every behavioral signal with higher accuracy and context-awareness.
+ *
+ * Auto-review triggers:
+ *   - ML ensemble sets override_review = true (high-confidence bad actor)
+ *   - Score drops below 20 for the first time (behavioral degradation)
  */
 
 import { query, queryOne, withTransaction } from '@privid/shared';
 import type { TrustTier, UserRow } from '@privid/shared';
-import { extractBlockContext, extractFeatures } from './featureStore';
-import { classifyBlockIntent, blockPenaltyPts } from './blockIntent';
-import { mlScoreUser } from './mlClient';
+import { extractFeatures } from './featureStore';
+import { mlScoreUser, mlBatchScore } from './mlClient';
+import type { UserFeatures } from './featureStore';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-export const TRUST_FACTOR_WEIGHTS: Record<string, number> = {
+export const VERIFICATION_WEIGHTS: Record<string, number> = {
   phone_verified:   15,
   device_integrity: 10,
   liveness_check:   25,
   govt_id_verified: 30,
-  profile_complete: 5,
-  account_age:      5,
-  network_trust:    10,
+  profile_complete:  5,
+  account_age:       5,
 };
 
 export const TIER_THRESHOLDS: { tier: TrustTier; min: number }[] = [
@@ -60,12 +67,12 @@ export function scoreToTier(score: number): TrustTier {
   return 'anonymous';
 }
 
-// ─── Static factor helpers ────────────────────────────────────────────────────
+// ─── Verification factor helpers ──────────────────────────────────────────────
 
 async function getCompletedFactors(userId: string): Promise<Set<string>> {
   const rows = await query(
     `SELECT factor_type FROM trust_factors WHERE user_id = $1 AND status = 'completed'`,
-    [userId]
+    [userId],
   );
   return new Set(rows.map((r) => r.factor_type));
 }
@@ -73,7 +80,7 @@ async function getCompletedFactors(userId: string): Promise<Set<string>> {
 async function getProfileCompleteness(userId: string): Promise<boolean> {
   const user = await queryOne<UserRow>(
     `SELECT display_name, avatar_url FROM users WHERE user_id = $1`,
-    [userId]
+    [userId],
   );
   return !!(user?.display_name && user?.avatar_url);
 }
@@ -81,322 +88,272 @@ async function getProfileCompleteness(userId: string): Promise<boolean> {
 async function getAccountAgeDays(userId: string): Promise<number> {
   const row = await queryOne<{ days: number }>(
     `SELECT EXTRACT(DAY FROM NOW() - created_at)::int AS days FROM users WHERE user_id = $1`,
-    [userId]
+    [userId],
   );
   return row?.days ?? 0;
 }
 
-async function getNetworkTrustScore(userId: string): Promise<number> {
-  const row = await queryOne<{ avg_score: string | null }>(
-    `SELECT AVG(u.trust_score)::numeric(5,2) AS avg_score
-     FROM connections c
-     JOIN users u ON u.user_id = c.contact_id
-     WHERE c.owner_id = $1 AND c.connection_type = 'trusted'`,
-    [userId]
-  );
-  const avg = parseFloat(row?.avg_score ?? '0');
-  return avg ? Math.min(10, Math.round((avg / 70) * 10)) : 0;
-}
-
-// ─── Behavioral penalty (intent-aware) ────────────────────────────────────────
-//
-// Replaces the flat "-3 per block" formula with Block Intent Classification:
-//   personal_dispute  → weight ≈ 0.1  (−0.3 pts)
-//   spam_block        → weight = 1.0  (−3.0 pts, same as before)
-//   harassment_block  → weight = 2.5  (−7.5 pts)
-//
-// Blocks from promiscuous blockers (high callee_block_propensity) are
-// discounted further because their block signal is noisy.
-
-async function getStaticBehaviorPenalty(userId: string): Promise<number> {
-  const [blockRows, flags] = await Promise.all([
-    query<{ owner_id: string }>(
-      `SELECT owner_id FROM connections
-       WHERE contact_id = $1 AND connection_type = 'blocked'
-         AND updated_at > NOW() - INTERVAL '30 days'`,
-      [userId],
-    ),
-    query<{ count: string }>(
-      `SELECT COUNT(*) as count FROM behavior_events
-       WHERE user_id = $1 AND event_type = 'mass_outreach_flag'
-         AND created_at > NOW() - INTERVAL '30 days'`,
-      [userId],
-    ),
-  ]);
-
-  // Classify each block independently, accumulate weighted penalty
-  let blockPenalty = 0;
-  for (const row of blockRows) {
-    try {
-      const ctx    = await extractBlockContext(row.owner_id, userId);
-      const intent = classifyBlockIntent(ctx);
-      blockPenalty += blockPenaltyPts(intent);
-    } catch {
-      blockPenalty += 3; // fallback to old flat penalty on error
-    }
-  }
-  blockPenalty = Math.min(15, blockPenalty);
-
-  const outreachPenalty = Math.min(10, parseInt(flags[0].count) * 5);
-  return blockPenalty + outreachPenalty;
-}
-
-// ─── Call frequency / velocity penalty (dynamic, situational) ────────────────
-//
-// This replaces the flat "mass_outreach > 70% decline" with a continuous,
-// frequency-aware signal. We look at 3 dimensions:
-//
-//   1. Daily volume to unknowns  — penalizes high raw volume
-//   2. Day-over-day acceleration — penalizes rapidly increasing pace
-//   3. Unanswered rate trend     — penalizes consistently ignored calls
-//
-// Design goals:
-//   - A recruiter making 15 calls/day ALL answered: penalty ≈ 0
-//   - A spammer making 15 calls/day NONE answered: penalty ≈ 10-15
-//   - A spammer DOUBLING their call rate each day: extra acceleration penalty
-//   - A reformed spammer reducing calls: penalty decreases over days
-
-async function getCallFrequencyPenalty(userId: string): Promise<number> {
-  // Per-day stats for last 5 days
-  const rows = await query<{
-    day: string;
-    calls_to_unknowns: string;
-    total_calls: string;
-    unanswered: string;
-  }>(`
-    SELECT
-      DATE(c.created_at) AS day,
-      COUNT(*) FILTER (
-        WHERE NOT EXISTS (
-          SELECT 1 FROM connections cc
-          WHERE cc.owner_id = c.callee_id
-            AND cc.contact_id = c.caller_id
-            AND cc.connection_type NOT IN ('unknown', 'blocked')
-        )
-      )::text AS calls_to_unknowns,
-      COUNT(*)::text AS total_calls,
-      COUNT(*) FILTER (WHERE c.status NOT IN ('answered','ended'))::text AS unanswered
-    FROM calls c
-    WHERE c.caller_id = $1
-      AND c.created_at > NOW() - INTERVAL '5 days'
-    GROUP BY DATE(c.created_at)
-    ORDER BY day ASC
-  `, [userId]);
-
-  if (rows.length === 0) return 0;
-
-  let penalty = 0;
-
-  for (let i = 0; i < rows.length; i++) {
-    const cu  = parseInt(rows[i].calls_to_unknowns);
-    const tot = parseInt(rows[i].total_calls);
-    const una = parseInt(rows[i].unanswered);
-
-    // 1. Volume penalty (per day)
-    if (cu >= 30) penalty += 6;
-    else if (cu >= 20) penalty += 4;
-    else if (cu >= 10) penalty += 2;
-    else if (cu >= 5)  penalty += 1;
-
-    // 2. Unanswered rate (only matters when volume is meaningful)
-    if (cu >= 5) {
-      const uRate = una / tot;
-      if (uRate >= 0.95) penalty += 5;
-      else if (uRate >= 0.80) penalty += 3;
-      else if (uRate >= 0.65) penalty += 1;
-      // Good answer rate actively reduces accumulated penalty
-      else if (uRate <= 0.20) penalty -= 1;
-    }
-
-    // 3. Acceleration: this day > 1.5× the previous day's unknown calls
-    if (i > 0) {
-      const prev = parseInt(rows[i - 1].calls_to_unknowns);
-      if (prev > 0 && cu / prev >= 2.0) penalty += 4;       // 2×+ daily jump
-      else if (prev > 0 && cu / prev >= 1.5) penalty += 2;  // 1.5× jump
-      // Deceleration is rewarded
-      else if (prev > 5 && cu / prev <= 0.5) penalty -= 2;
-    }
-  }
-
-  return Math.max(0, Math.min(20, penalty));
-}
-
-// ─── Core score computation ───────────────────────────────────────────────────
+// ─── Score breakdown types ─────────────────────────────────────────────────────
 
 export interface TrustBreakdown {
   total: number;
-  tier: TrustTier;
+  tier:  TrustTier;
   factors: {
-    phone_verified: number;
+    phone_verified:   number;
     device_integrity: number;
-    liveness_check: number;
+    liveness_check:   number;
     govt_id_verified: number;
     profile_complete: number;
-    account_age: number;
-    network_trust: number;
-    behavior_modifier: number;
-    call_freq_penalty: number;
-    ml_delta: number;
+    account_age:      number;
+    ml_modifier:      number;   // replaces all former behavioral penalties
   };
   ml?: {
     persona_prediction: string;
-    confidence: number;
-    flags: string[];
-    model_agreement: number;
-    override_review: boolean;
+    confidence:         number;
+    flags:              string[];
+    model_agreement:    number;
+    override_review:    boolean;
   };
 }
 
+// ─── Core score computation ────────────────────────────────────────────────────
+
 export async function computeTrustScore(userId: string): Promise<TrustBreakdown> {
-  const [completed, profileDone, ageDays, networkScore, staticPenalty, freqPenalty] = await Promise.all([
+  // Verification factors run in parallel with ML feature extraction
+  const [completed, profileDone, ageDays, userFeatures] = await Promise.all([
     getCompletedFactors(userId),
     getProfileCompleteness(userId),
     getAccountAgeDays(userId),
-    getNetworkTrustScore(userId),
-    getStaticBehaviorPenalty(userId),
-    getCallFrequencyPenalty(userId),
+    extractFeatures(userId).catch(() => null),
   ]);
 
-  const totalPenalty = Math.min(40, staticPenalty + freqPenalty);
-
-  // ── Rule-based score ───────────────────────────────────────────────────────
-  const ruleFactors = {
-    phone_verified:    completed.has('phone_verified')   ? 15 : 0,
-    device_integrity:  completed.has('device_integrity') ? 10 : 0,
-    liveness_check:    completed.has('liveness_check')   ? 25 : 0,
-    govt_id_verified:  completed.has('govt_id_verified') ? 30 : 0,
-    profile_complete:  profileDone ? 5 : 0,
-    account_age:       Math.min(5, Math.round((ageDays / 180) * 5)),
-    network_trust:     networkScore,
-    behavior_modifier: -(staticPenalty),
-    call_freq_penalty: -(freqPenalty),
+  const factors = {
+    phone_verified:   completed.has('phone_verified')   ? 15 : 0,
+    device_integrity: completed.has('device_integrity') ? 10 : 0,
+    liveness_check:   completed.has('liveness_check')   ? 25 : 0,
+    govt_id_verified: completed.has('govt_id_verified') ? 30 : 0,
+    profile_complete: profileDone ? 5 : 0,
+    account_age:      Math.min(5, Math.round((ageDays / 180) * 5)),
+    ml_modifier:      0,
   };
 
-  const ruleRaw = (
-    ruleFactors.phone_verified + ruleFactors.device_integrity + ruleFactors.liveness_check +
-    ruleFactors.govt_id_verified + ruleFactors.profile_complete + ruleFactors.account_age +
-    ruleFactors.network_trust - totalPenalty
+  const verificationBase = (
+    factors.phone_verified + factors.device_integrity + factors.liveness_check +
+    factors.govt_id_verified + factors.profile_complete + factors.account_age
   );
 
-  // ── ML delta (fail-open: 0 if service unavailable) ─────────────────────────
-  let mlDelta = 0;
+  // ── ML behavioral modifier (fail-open: 0 if service unavailable) ────────────
   let mlResult: TrustBreakdown['ml'] | undefined;
 
-  try {
-    const userFeatures = await extractFeatures(userId);
-    const ml = await mlScoreUser(userFeatures);
-    mlDelta   = ml.ml_score_delta;
-    mlResult  = {
-      persona_prediction: ml.persona_prediction,
-      confidence:         ml.confidence,
-      flags:              ml.ml_flags,
-      model_agreement:    ml.model_agreement,
-      override_review:    ml.override_review,
-    };
-  } catch {
-    // ML service down — rule-based score stands alone
+  if (userFeatures) {
+    try {
+      const ml = await mlScoreUser(userFeatures);
+      factors.ml_modifier = ml.ml_score_delta;
+      mlResult = {
+        persona_prediction: ml.persona_prediction,
+        confidence:         ml.confidence,
+        flags:              ml.ml_flags,
+        model_agreement:    ml.model_agreement,
+        override_review:    ml.override_review,
+      };
+    } catch {
+      // ML service down — verification-only score, no behavioral modifier
+    }
   }
 
-  const raw   = ruleRaw + mlDelta;
-  const total = Math.max(0, Math.min(100, raw));
-
-  const factors = {
-    ...ruleFactors,
-    ml_delta: mlDelta,
-  };
-
+  const total = Math.max(0, Math.min(100, verificationBase + factors.ml_modifier));
   return { total, tier: scoreToTier(total), factors, ml: mlResult };
 }
 
-// ─── Bulk compute for simulation (single SQL, no per-user queries) ───────────
+// ─── Bulk compute (simulation + admin jobs) ───────────────────────────────────
+//
+// Efficient path for scoring many users at once:
+//   1. Single SQL to get verification points for all users
+//   2. Single SQL to extract core behavioral features for all users
+//   3. One HTTP call to ML /batch-score
+//   4. Combine: verification_pts + ml_delta per user
 
 export async function bulkComputeScores(userIds: string[]): Promise<Array<{
-  user_id: string;
+  user_id:        string;
   computed_score: number;
-  tier: TrustTier;
+  tier:           TrustTier;
 }>> {
   if (userIds.length === 0) return [];
 
-  const rows = await query<{ user_id: string; computed_score: string }>(
+  // ── 1. Verification points (single SQL) ─────────────────────────────────────
+  const verRows = await query<{
+    user_id:   string;
+    base_pts:  string;
+    age_pts:   string;
+    has_profile: string;
+  }>(
     `WITH
-      cf AS (
-        SELECT user_id,
-          SUM(CASE factor_type
-            WHEN 'phone_verified'   THEN 15
-            WHEN 'device_integrity' THEN 10
-            WHEN 'liveness_check'   THEN 25
-            WHEN 'govt_id_verified' THEN 30
-            ELSE 0 END) AS base_pts
-        FROM trust_factors
-        WHERE user_id = ANY($1) AND status = 'completed'
-        GROUP BY user_id
-      ),
-      aa AS (
-        SELECT user_id,
-          LEAST(5, FLOOR(EXTRACT(DAY FROM NOW() - created_at) / 180.0 * 5)::int) AS age_pts
-        FROM users WHERE user_id = ANY($1)
-      ),
-      net AS (
-        SELECT c.owner_id AS user_id,
-          LEAST(10, ROUND(AVG(u.trust_score)::numeric / 70.0 * 10)::int) AS net_pts
-        FROM connections c
-        JOIN users u ON u.user_id = c.contact_id
-        WHERE c.owner_id = ANY($1) AND c.connection_type = 'trusted'
-        GROUP BY c.owner_id
-      ),
-      blk AS (
-        SELECT contact_id AS user_id, LEAST(15, COUNT(*) * 3)::int AS blk_pen
-        FROM connections
-        WHERE contact_id = ANY($1) AND connection_type = 'blocked'
-          AND updated_at > NOW() - INTERVAL '30 days'
-        GROUP BY contact_id
-      ),
-      flg AS (
-        SELECT user_id, LEAST(10, COUNT(*) * 5)::int AS flg_pen
-        FROM behavior_events
-        WHERE user_id = ANY($1) AND event_type = 'mass_outreach_flag'
-          AND created_at > NOW() - INTERVAL '30 days'
-        GROUP BY user_id
-      ),
-      vel AS (
-        SELECT caller_id AS user_id,
-          LEAST(20,
-            (COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours')
-              * CASE WHEN COUNT(*) FILTER (WHERE status NOT IN ('answered','ended')) * 1.0 / NULLIF(COUNT(*),0) > 0.9 THEN 6
-                     WHEN COUNT(*) FILTER (WHERE status NOT IN ('answered','ended')) * 1.0 / NULLIF(COUNT(*),0) > 0.7 THEN 3
-                     ELSE 0 END
-            ) / GREATEST(1, 5)
-          )::int AS vel_pen
-        FROM calls
-        WHERE caller_id = ANY($1) AND created_at > NOW() - INTERVAL '3 days'
-        GROUP BY caller_id
-      )
-      SELECT
-        u.user_id,
-        GREATEST(0, LEAST(100,
-          COALESCE(cf.base_pts, 0) +
-          COALESCE(aa.age_pts, 0) +
-          COALESCE(net.net_pts, 0) -
-          COALESCE(blk.blk_pen, 0) -
-          COALESCE(flg.flg_pen, 0) -
-          COALESCE(vel.vel_pen, 0)
-        ))::text AS computed_score
-      FROM users u
-      LEFT JOIN cf  ON cf.user_id  = u.user_id
-      LEFT JOIN aa  ON aa.user_id  = u.user_id
-      LEFT JOIN net ON net.user_id = u.user_id
-      LEFT JOIN blk ON blk.user_id = u.user_id
-      LEFT JOIN flg ON flg.user_id = u.user_id
-      LEFT JOIN vel ON vel.user_id = u.user_id
-      WHERE u.user_id = ANY($1)`,
+       cf AS (
+         SELECT user_id,
+           SUM(CASE factor_type
+             WHEN 'phone_verified'   THEN 15
+             WHEN 'device_integrity' THEN 10
+             WHEN 'liveness_check'   THEN 25
+             WHEN 'govt_id_verified' THEN 30
+             ELSE 0 END)::int AS base_pts
+         FROM trust_factors
+         WHERE user_id = ANY($1) AND status = 'completed'
+         GROUP BY user_id
+       ),
+       aa AS (
+         SELECT user_id,
+           LEAST(5, FLOOR(EXTRACT(DAY FROM NOW() - created_at) / 180.0 * 5)::int) AS age_pts,
+           CASE WHEN display_name IS NOT NULL AND avatar_url IS NOT NULL THEN 5 ELSE 0 END AS has_profile
+         FROM users WHERE user_id = ANY($1)
+       )
+     SELECT
+       u.user_id,
+       (COALESCE(cf.base_pts, 0) + COALESCE(aa.age_pts, 0) + COALESCE(aa.has_profile, 0))::text AS base_pts,
+       COALESCE(aa.age_pts, 0)::text   AS age_pts,
+       COALESCE(aa.has_profile, 0)::text AS has_profile
+     FROM users u
+     LEFT JOIN cf ON cf.user_id = u.user_id
+     LEFT JOIN aa ON aa.user_id = u.user_id
+     WHERE u.user_id = ANY($1)`,
     [userIds],
   );
 
-  return rows.map(r => ({
-    user_id: r.user_id,
-    computed_score: parseInt(r.computed_score),
-    tier: scoreToTier(parseInt(r.computed_score)),
+  const verMap = new Map(verRows.map(r => [r.user_id, parseInt(r.base_pts)]));
+
+  // ── 2. Bulk behavioral features (single SQL) ─────────────────────────────────
+  const featRows = await query<{
+    user_id:                     string;
+    calls_out_1d:                string;
+    calls_out_7d:                string;
+    calls_out_30d:               string;
+    calls_in_7d:                 string;
+    unique_callees_1d:           string;
+    unique_callees_7d:           string;
+    answer_rate_out_7d:          string;
+    avg_call_duration_7d:        string;
+    pct_calls_under_30s_7d:      string;
+    blocked_by_7d:               string;
+    blocked_by_30d:              string;
+    trusted_contacts_count:      string;
+  }>(
+    `WITH
+       vol_out AS (
+         SELECT caller_id AS user_id,
+           COUNT(*) FILTER (WHERE created_at > NOW()-INTERVAL '1 day')   AS calls_out_1d,
+           COUNT(*) FILTER (WHERE created_at > NOW()-INTERVAL '7 days')  AS calls_out_7d,
+           COUNT(*) FILTER (WHERE created_at > NOW()-INTERVAL '30 days') AS calls_out_30d,
+           COUNT(DISTINCT callee_id) FILTER (WHERE created_at > NOW()-INTERVAL '1 day')  AS unique_callees_1d,
+           COUNT(DISTINCT callee_id) FILTER (WHERE created_at > NOW()-INTERVAL '7 days') AS unique_callees_7d,
+           AVG(CASE WHEN status='answered' THEN 1.0 ELSE 0.0 END)
+             FILTER (WHERE created_at > NOW()-INTERVAL '7 days') AS answer_rate_out_7d,
+           AVG(EXTRACT(EPOCH FROM (ended_at - created_at)))
+             FILTER (WHERE status='answered' AND created_at > NOW()-INTERVAL '7 days') AS avg_call_duration_7d,
+           AVG(CASE WHEN EXTRACT(EPOCH FROM (ended_at - created_at)) < 30 THEN 1.0 ELSE 0.0 END)
+             FILTER (WHERE created_at > NOW()-INTERVAL '7 days') AS pct_calls_under_30s_7d
+         FROM calls WHERE caller_id = ANY($1)
+         GROUP BY caller_id
+       ),
+       vol_in AS (
+         SELECT callee_id AS user_id,
+           COUNT(*) FILTER (WHERE created_at > NOW()-INTERVAL '7 days') AS calls_in_7d
+         FROM calls WHERE callee_id = ANY($1)
+         GROUP BY callee_id
+       ),
+       net AS (
+         SELECT contact_id AS user_id,
+           COUNT(*) FILTER (WHERE connection_type='trusted') AS trusted_contacts_count,
+           COUNT(*) FILTER (WHERE connection_type='blocked' AND updated_at > NOW()-INTERVAL '7 days')  AS blocked_by_7d,
+           COUNT(*) FILTER (WHERE connection_type='blocked' AND updated_at > NOW()-INTERVAL '30 days') AS blocked_by_30d
+         FROM connections WHERE contact_id = ANY($1)
+         GROUP BY contact_id
+       )
+     SELECT
+       u.user_id,
+       COALESCE(vol_out.calls_out_1d,   0)::text AS calls_out_1d,
+       COALESCE(vol_out.calls_out_7d,   0)::text AS calls_out_7d,
+       COALESCE(vol_out.calls_out_30d,  0)::text AS calls_out_30d,
+       COALESCE(vol_in.calls_in_7d,     0)::text AS calls_in_7d,
+       COALESCE(vol_out.unique_callees_1d,  0)::text AS unique_callees_1d,
+       COALESCE(vol_out.unique_callees_7d,  0)::text AS unique_callees_7d,
+       COALESCE(vol_out.answer_rate_out_7d, 1.0)::text AS answer_rate_out_7d,
+       COALESCE(vol_out.avg_call_duration_7d, 0)::text AS avg_call_duration_7d,
+       COALESCE(vol_out.pct_calls_under_30s_7d, 0)::text AS pct_calls_under_30s_7d,
+       COALESCE(net.blocked_by_7d,  0)::text AS blocked_by_7d,
+       COALESCE(net.blocked_by_30d, 0)::text AS blocked_by_30d,
+       COALESCE(net.trusted_contacts_count, 0)::text AS trusted_contacts_count
+     FROM users u
+     LEFT JOIN vol_out ON vol_out.user_id = u.user_id
+     LEFT JOIN vol_in  ON vol_in.user_id  = u.user_id
+     LEFT JOIN net     ON net.user_id     = u.user_id
+     WHERE u.user_id = ANY($1)`,
+    [userIds],
+  );
+
+  // ── 3. Build feature vectors + call ML batch-score ───────────────────────────
+  const featuresList: UserFeatures[] = featRows.map(r => ({
+    user_id:    r.user_id,
+    computed_at: new Date().toISOString(),
+    // Identity (not in bulk SQL — treated as 0 for ML; verification handled separately)
+    phone_verified: false, device_integrity: false, liveness_check: false,
+    govt_id_verified: false, profile_completeness: 0, account_age_days: 0,
+    // Volume
+    calls_out_1d:  parseFloat(r.calls_out_1d),
+    calls_out_7d:  parseFloat(r.calls_out_7d),
+    calls_out_30d: parseFloat(r.calls_out_30d),
+    calls_in_1d:   0,
+    calls_in_7d:   parseFloat(r.calls_in_7d),
+    calls_in_30d:  0,
+    unique_callees_1d:  parseFloat(r.unique_callees_1d),
+    unique_callees_7d:  parseFloat(r.unique_callees_7d),
+    unique_callees_30d: 0,
+    unique_callers_7d:  0,
+    calls_per_unique_callee_1d: parseFloat(r.unique_callees_1d) > 0
+      ? parseFloat(r.calls_out_1d) / parseFloat(r.unique_callees_1d) : 0,
+    new_targets_1d: 0,
+    // Quality
+    answer_rate_out_1d: parseFloat(r.answer_rate_out_7d),
+    answer_rate_out_7d: parseFloat(r.answer_rate_out_7d),
+    answer_rate_in_1d:  1.0,
+    answer_rate_in_7d:  1.0,
+    avg_call_duration_7d:    parseFloat(r.avg_call_duration_7d),
+    pct_calls_under_30s_7d:  parseFloat(r.pct_calls_under_30s_7d),
+    reciprocal_rate_30d:     0,
+    calls_to_trusted_ratio_7d: 0,
+    // Behavioral (zeros — not computed in bulk path; ML handles gracefully)
+    unknown_call_ratio_7d: 0,
+    burst_count_7d:        0,
+    burst_acceleration:    0,
+    repeat_call_rate_7d:   0,
+    sequential_dialing_max: 0,
+    first_contact_ghost_ratio_30d: 0,
+    consistent_ignorer_count_30d:  0,
+    // Network
+    trusted_contacts_count: parseFloat(r.trusted_contacts_count),
+    blocked_by_7d:          parseFloat(r.blocked_by_7d),
+    blocked_by_30d:         parseFloat(r.blocked_by_30d),
+    block_trusted_ratio: parseFloat(r.trusted_contacts_count) > 0
+      ? parseFloat(r.blocked_by_30d) / parseFloat(r.trusted_contacts_count) : 0,
+    avg_trust_of_network:       0,
+    shared_targets_with_flagged: 0,
+    // Trend
+    score_slope_7d:    0,
+    behavior_regime:   'stable',
+    regime_stable:     1,
+    regime_escalating: 0,
+    regime_declining:  0,
+    regime_recovering: 0,
   }));
+
+  const mlResults = await mlBatchScore(featuresList);
+  const mlMap = new Map(mlResults.map(r => [r.user_id, r.ml_score_delta]));
+
+  // ── 4. Combine ────────────────────────────────────────────────────────────────
+  return userIds.map(uid => {
+    const verPts = verMap.get(uid) ?? 0;
+    const mlDelta = mlMap.get(uid) ?? 0;
+    const computed_score = Math.max(0, Math.min(100, verPts + mlDelta));
+    return { user_id: uid, computed_score, tier: scoreToTier(computed_score) };
+  });
 }
 
 // ─── Persist recomputed score + trigger review ────────────────────────────────
@@ -407,14 +364,14 @@ export async function recomputeAndPersist(userId: string): Promise<TrustBreakdow
   await withTransaction(async (client) => {
     const { rows } = await client.query<UserRow>(
       `SELECT trust_score, trust_tier, is_under_review FROM users WHERE user_id = $1 FOR UPDATE`,
-      [userId]
+      [userId],
     );
     const current = rows[0];
     if (!current) return;
 
     await client.query(
       `UPDATE users SET trust_score = $1, trust_tier = $2 WHERE user_id = $3`,
-      [breakdown.total, breakdown.tier, userId]
+      [breakdown.total, breakdown.tier, userId],
     );
 
     if (current.trust_score !== breakdown.total || current.trust_tier !== breakdown.tier) {
@@ -425,21 +382,16 @@ export async function recomputeAndPersist(userId: string): Promise<TrustBreakdow
       );
     }
 
-    // Auto-review: score crosses below 20 for the first time
-    const mlOverride = breakdown.ml?.override_review ?? false;
-    const scoreDropped = (
-      breakdown.total < REVIEW_THRESHOLD &&
-      current.trust_score >= REVIEW_THRESHOLD
-    );
+    // Auto-review triggers
+    const mlOverride  = breakdown.ml?.override_review ?? false;
+    const scoreDropped = breakdown.total < REVIEW_THRESHOLD && current.trust_score >= REVIEW_THRESHOLD;
 
     if (!current.is_under_review && (scoreDropped || mlOverride)) {
       let reason: string;
       if (mlOverride && breakdown.ml) {
-        reason = `ML consensus review: ${breakdown.ml.persona_prediction} detected with ${(breakdown.ml.confidence * 100).toFixed(0)}% confidence. Flags: ${breakdown.ml.flags.slice(0, 2).join('; ')}.`;
-      } else if (breakdown.factors.call_freq_penalty < -5) {
-        reason = `Score dropped to ${breakdown.total} — abnormal call frequency pattern detected.`;
+        reason = `ML detected ${breakdown.ml.persona_prediction} with ${(breakdown.ml.confidence * 100).toFixed(0)}% confidence. ${breakdown.ml.flags.slice(0, 2).join(' ')}`;
       } else {
-        reason = `Score dropped to ${breakdown.total} — multiple blocks and/or outreach flags.`;
+        reason = `Score dropped to ${breakdown.total} — abnormal behavioral pattern detected by ML.`;
       }
       await client.query(
         `UPDATE users SET is_under_review = true, review_reason = $1, review_started_at = NOW()

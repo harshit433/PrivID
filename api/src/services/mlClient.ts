@@ -10,10 +10,11 @@
  *   ML_TIMEOUT_MS    per-request timeout in ms         (default: 3000)
  *
  * Fail-open design: if the ML service is unreachable or returns an error,
- * all functions return a safe default so the rule-based score is never blocked.
+ * all functions return a safe default (delta=0) so scoring degrades gracefully
+ * to verification-only rather than failing outright.
  */
 
-import type { UserFeatures, BlockContext } from './featureStore';
+import type { UserFeatures } from './featureStore';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -22,18 +23,6 @@ const ML_KEY    = process.env.ML_API_KEY     ?? 'privid-ml-dev-key';
 const ML_TIMEOUT = parseInt(process.env.ML_TIMEOUT_MS ?? '3000', 10);
 
 // ─── Response types ───────────────────────────────────────────────────────────
-
-export interface MLBlockIntentResult {
-  label:        'personal_dispute' | 'spam_block' | 'harassment_block';
-  p_personal:   number;
-  p_spam:       number;
-  p_harassment: number;
-  weight:       number;
-  penalty_pts:  number;
-  confidence:   number;
-  source:       string;
-  latency_ms:   number;
-}
 
 export interface MLBehaviorDetail {
   label:            string;
@@ -78,18 +67,6 @@ export interface MLBatchScoreItem {
 
 // ─── Safe defaults (returned when the ML service is unavailable) ───────────
 
-const SAFE_BLOCK_INTENT: MLBlockIntentResult = {
-  label:        'spam_block',
-  p_personal:   0,
-  p_spam:       1,
-  p_harassment: 0,
-  weight:       1.0,
-  penalty_pts:  3.0,
-  confidence:   0,
-  source:       'fallback',
-  latency_ms:   0,
-};
-
 const SAFE_SCORE: MLScoreResult = {
   user_id:            '',
   ml_score_delta:     0,
@@ -97,7 +74,7 @@ const SAFE_SCORE: MLScoreResult = {
   persona_prediction: 'unknown',
   confidence:         0,
   model_agreement:    0,
-  ml_flags:           ['ML service unavailable — using rule-based score only'],
+  ml_flags:           ['ML service unavailable — verification-only score applied'],
   models: {
     behavior: { label: 'unknown', label_id: 0, probabilities: [], confidence: 0, spam_signals: [], harasser_signals: [], source: 'fallback' },
     anomaly:  { is_anomaly: false, anomaly_score: 0, normalized: 0, percentile: 100, source: 'fallback' },
@@ -139,30 +116,6 @@ async function mlFetch<T>(path: string, body: unknown): Promise<T> {
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
-
-/**
- * Classify a single block event.
- * Returns a safe default (spam_block, weight=1.0) if the ML service is unavailable.
- */
-export async function mlClassifyBlockIntent(ctx: BlockContext): Promise<MLBlockIntentResult> {
-  try {
-    return await mlFetch<MLBlockIntentResult>('/block-intent', {
-      blocker_id:               ctx.blocker_id,
-      blocked_id:               ctx.blocked_id,
-      calls_before_block:       ctx.calls_before_block,
-      days_known_before_block:  ctx.days_known_before_block,
-      was_ever_trusted:         ctx.was_ever_trusted,
-      block_speed_hours:        ctx.block_speed_hours,
-      answered_before_block:    ctx.answered_before_block,
-      avg_duration_before_block: ctx.avg_duration_before_block,
-      mutual_call_count:        ctx.mutual_call_count,
-      callee_block_propensity:  ctx.callee_block_propensity,
-      block_cluster_24h:        ctx.block_cluster_24h,
-    });
-  } catch {
-    return SAFE_BLOCK_INTENT;
-  }
-}
 
 /**
  * Get ML score delta and behavioral analysis for a user.

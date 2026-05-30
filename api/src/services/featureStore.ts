@@ -3,9 +3,7 @@
  *
  * Extracts ~45 behavioral features for a user, used by:
  *   - ML trust score models (Python inference service)
- *   - Block intent classifier
- *   - Temporal pattern detector
- *   - Training data export
+ *   - Training data export for model retraining
  *
  * All features are computed from PostgreSQL and are point-in-time snapshots.
  * Hot path (per-call scoring) uses a subset; full extraction is for batch scoring.
@@ -71,24 +69,6 @@ export interface UserFeatures {
   // ── Trend (requires trust_score_history) ────────────────────────────────────
   score_slope_7d: number;              // pts/day; negative = degrading
   behavior_regime: 'stable' | 'escalating' | 'declining' | 'recovering';
-}
-
-// ─── Block context ─────────────────────────────────────────────────────────────
-// Snapshot of a specific block event, used by BlockIntentClassifier
-
-export interface BlockContext {
-  blocker_id: string;               // person doing the blocking
-  blocked_id: string;               // person being blocked (the caller)
-
-  calls_before_block: number;       // total interactions before block
-  days_known_before_block: number;  // days since first contact
-  was_ever_trusted: boolean;        // had a trusted relationship → personal dispute
-  block_speed_hours: number;        // hours from first contact to block (low = spam)
-  answered_before_block: number;    // calls answered before block
-  avg_duration_before_block: number; // seconds; very short avg = spam-like
-  mutual_call_count: number;        // times blocker ever called blocked back
-  callee_block_propensity: number;  // fraction of blocker's contacts that are blocked
-  block_cluster_24h: number;        // distinct people who blocked the same caller today
 }
 
 // ─── Main extraction ───────────────────────────────────────────────────────────
@@ -499,79 +479,3 @@ async function getTrendFeatures(userId: string) {
   };
 }
 
-// ─── Block context ─────────────────────────────────────────────────────────────
-
-export async function extractBlockContext(
-  blockerId: string,
-  blockedId: string,
-): Promise<BlockContext> {
-  const [histRow, propensityRow, clusterRow, mutualRow] = await Promise.all([
-    // Interaction history: calls from blocked→blocker (blocked was the caller)
-    queryOne<{
-      calls_count: string;
-      days_known: string;
-      block_speed_hours: string;
-      answered_count: string;
-      avg_duration: string | null;
-    }>(
-      `SELECT
-         COUNT(*)::text AS calls_count,
-         EXTRACT(DAY  FROM NOW() - MIN(created_at))::text AS days_known,
-         EXTRACT(EPOCH FROM (NOW() - MIN(created_at)) / 3600)::text AS block_speed_hours,
-         COUNT(*) FILTER (WHERE status IN ('answered','ended'))::text AS answered_count,
-         AVG(duration_seconds) FILTER (WHERE duration_seconds IS NOT NULL)::text AS avg_duration
-       FROM calls
-       WHERE caller_id = $2 AND callee_id = $1`,
-      [blockerId, blockedId],
-    ),
-    // How often does this blocker block people? (personal preference signal)
-    queryOne<{ block_count: string; total_count: string }>(
-      `SELECT
-         COUNT(*) FILTER (WHERE connection_type = 'blocked')::text AS block_count,
-         COUNT(*)::text AS total_count
-       FROM connections WHERE owner_id = $1`,
-      [blockerId],
-    ),
-    // Block cluster: how many others blocked the same person today?
-    queryOne<{ cluster_count: string }>(
-      `SELECT COUNT(DISTINCT owner_id)::text AS cluster_count
-       FROM connections
-       WHERE contact_id = $2
-         AND connection_type = 'blocked'
-         AND updated_at > NOW() - INTERVAL '24 hours'
-         AND owner_id != $1`,
-      [blockerId, blockedId],
-    ),
-    // Mutual calls: did the blocker ever call the blocked person?
-    queryOne<{ mutual_count: string }>(
-      `SELECT COUNT(*)::text AS mutual_count
-       FROM calls WHERE caller_id = $1 AND callee_id = $2`,
-      [blockerId, blockedId],
-    ),
-  ]);
-
-  const i = (s: string | null | undefined, def = 0) => parseInt(s ?? String(def), 10) || def;
-  const n = (s: string | null | undefined, def = 0) => parseFloat(s ?? String(def)) || def;
-
-  const blockCount  = i(propensityRow?.block_count);
-  const totalCount  = i(propensityRow?.total_count);
-
-  // "was_ever_trusted" approximation: if they had >5 answered calls before block,
-  // it implies a real relationship existed. True connection history not stored.
-  const answeredBeforeBlock = i(histRow?.answered_count);
-  const callsBeforeBlock    = i(histRow?.calls_count);
-
-  return {
-    blocker_id:               blockerId,
-    blocked_id:               blockedId,
-    calls_before_block:       callsBeforeBlock,
-    days_known_before_block:  n(histRow?.days_known),
-    was_ever_trusted:         answeredBeforeBlock >= 5,
-    block_speed_hours:        n(histRow?.block_speed_hours),
-    answered_before_block:    answeredBeforeBlock,
-    avg_duration_before_block: n(histRow?.avg_duration),
-    mutual_call_count:        i(mutualRow?.mutual_count),
-    callee_block_propensity:  totalCount > 0 ? blockCount / totalCount : 0,
-    block_cluster_24h:        i(clusterRow?.cluster_count),
-  };
-}

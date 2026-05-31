@@ -76,7 +76,7 @@ function capturePage(): string {
   var video=document.getElementById('v');
   var prog=document.getElementById('prog');
   var countEl=document.getElementById('count');
-  var DASH=289, HOLD_MS=2600, captured=false;
+  var DASH=289, HOLD_MS=2600, captured=false, started=false;
 
   window.addEventListener('error', function(e){ setStatus('Error: '+(e&&e.message?e.message:'unknown')); });
 
@@ -110,13 +110,45 @@ function capturePage(): string {
     },80);
   }
 
+  function beginWhenReady(){
+    if(started) return; started=true;
+    setTimeout(runCountdown, 500);
+  }
+
   (async function(){
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      setStatus('Camera API unavailable on this device/WebView.');
+      post({ type:'error', message:'NO_MEDIA_DEVICES' });
+      return;
+    }
+    setStatus('Starting camera…');
+
+    // Watchdog: if the camera neither starts nor errors (permission prompt never
+    // answered by the WebView), surface it instead of hanging forever.
+    var watchdog=setTimeout(function(){
+      if(!started){
+        setStatus('Camera did not start. Check camera permission for the app and retry.');
+        post({ type:'error', message:'CAMERA_TIMEOUT' });
+      }
+    }, 9000);
+
+    // Start the countdown as soon as frames are flowing (more reliable than
+    // onloadedmetadata across Android WebViews).
+    video.oncanplay=function(){ clearTimeout(watchdog); beginWhenReady(); };
+    video.onplaying=function(){ clearTimeout(watchdog); beginWhenReady(); };
+
+    function tryGet(constraints){ return navigator.mediaDevices.getUserMedia(constraints); }
+
     try {
-      setStatus('Starting camera…');
-      var stream=await navigator.mediaDevices.getUserMedia({ video:{ facingMode:'user', width:{ideal:720}, height:{ideal:960} }, audio:false });
+      var stream;
+      try { stream=await tryGet({ video:{ facingMode:'user' }, audio:false }); }
+      catch(e1){ stream=await tryGet({ video:true, audio:false }); }
       video.srcObject=stream;
-      video.onloadedmetadata=function(){ video.play().then(function(){ setTimeout(runCountdown, 600); }).catch(function(){ setTimeout(runCountdown, 600); }); };
+      try { await video.play(); } catch(e){ /* autoplay may defer; canplay handles it */ }
+      // Safety: if events somehow don't fire but we have a stream, start anyway.
+      setTimeout(function(){ if(!started && video.srcObject){ clearTimeout(watchdog); beginWhenReady(); } }, 2500);
     } catch(camErr){
+      clearTimeout(watchdog);
       var name=camErr&&camErr.name?camErr.name:String(camErr);
       setStatus('Camera blocked: '+name+'. Allow camera access and retry.');
       post({ type:'error', message:'CAMERA_DENIED: '+name });

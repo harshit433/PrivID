@@ -417,8 +417,11 @@ callsRouter.get('/history', requireAuth, async (req: Request, res: Response, nex
     const rows = await query(
       `SELECT
          c.call_id, c.call_type, c.status, c.started_at, c.ended_at, c.duration_seconds,
+         c.caller_id, c.callee_id,
          caller.handle AS caller_handle, caller.display_name AS caller_name,
+         caller.avatar_url AS caller_avatar_url,
          callee.handle AS callee_handle, callee.display_name AS callee_name,
+         callee.avatar_url AS callee_avatar_url,
          CASE WHEN c.caller_id = $1 THEN 'outgoing' ELSE 'incoming' END AS direction
        FROM calls c
        JOIN users caller ON caller.user_id = c.caller_id

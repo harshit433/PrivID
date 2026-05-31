@@ -51,6 +51,13 @@ function getDb(): admin.database.Database | null {
 
 // ── RTDB — Call Signaling ─────────────────────────────────────────────────────
 
+/** Used by the debug health endpoint to verify RTDB connectivity. */
+export async function testRtdbWrite(): Promise<void> {
+  const db = getDb();
+  if (!db) throw new Error('Firebase not initialised — check FIREBASE_SERVICE_ACCOUNT_JSON');
+  await db.ref('_health').set({ ts: Date.now() });
+}
+
 export type CallSignalStatus =
   | 'ringing'   // call created, waiting for callee
   | 'answered'  // callee answered — LiveKit takes over

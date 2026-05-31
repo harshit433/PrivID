@@ -43,44 +43,48 @@ app.get('/health', async (_req, res) => {
 });
 
 // ─── Debug: call system health ────────────────────────────────────────────────
-// Shows exactly what's configured so issues can be diagnosed instantly.
 app.get('/debug/call-health', async (_req, res) => {
+  const { testRtdbWrite } = await import('./services/fcm');
+  const { getPool } = await import('@privid/shared');
+
   const firebaseConfigured = !!process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
   const rtdbUrl = process.env.FIREBASE_DATABASE_URL ?? 'https://privid-cb3bf-default-rtdb.firebaseio.com';
 
-  // Count users with FCM tokens
+  let rtdbStatus = '⏳ not tested';
   let usersWithToken = 0;
-  let recentCalls = [];
+  let usersWithoutToken = 0;
+  let recentCalls: any[] = [];
+
   try {
-    const { getPool } = await import('@privid/shared');
     const pool = getPool();
-    const r1 = await pool.query(`SELECT COUNT(*) FROM users WHERE fcm_token IS NOT NULL`);
-    usersWithToken = parseInt(r1.rows[0].count);
-    const r2 = await pool.query(
-      `SELECT call_id, status, created_at, caller_id, callee_id FROM calls ORDER BY created_at DESC LIMIT 5`
-    );
-    recentCalls = r2.rows;
+    const [r1, r2, r3] = await Promise.all([
+      pool.query(`SELECT COUNT(*) FROM users WHERE fcm_token IS NOT NULL`),
+      pool.query(`SELECT COUNT(*) FROM users WHERE fcm_token IS NULL`),
+      pool.query(`SELECT call_id, status, created_at FROM calls ORDER BY created_at DESC LIMIT 5`),
+    ]);
+    usersWithToken    = parseInt(r1.rows[0].count);
+    usersWithoutToken = parseInt(r2.rows[0].count);
+    recentCalls = r3.rows;
   } catch (err: any) {
-    recentCalls = [{ error: err?.message }] as any;
+    recentCalls = [{ db_error: err?.message }];
   }
 
-  // Test RTDB write
-  let rtdbWorking = false;
-  if (firebaseConfigured) {
-    try {
-      const admin = await import('firebase-admin');
-      if (admin.default.apps.length > 0) {
-        await admin.default.database().ref('_health').set({ ts: Date.now() });
-        rtdbWorking = true;
-      }
-    } catch { rtdbWorking = false; }
+  try {
+    await testRtdbWrite();
+    rtdbStatus = '✅ working';
+  } catch (err: any) {
+    rtdbStatus = `❌ ${err?.message}`;
   }
 
   res.json({
-    firebase_service_account: firebaseConfigured ? '✅ SET' : '❌ MISSING — FCM + RTDB disabled',
+    firebase_configured: firebaseConfigured ? '✅ SET' : '❌ MISSING',
     rtdb_url: rtdbUrl,
-    rtdb_write_test: rtdbWorking ? '✅ working' : '❌ failed (check FIREBASE_SERVICE_ACCOUNT_JSON)',
-    users_with_fcm_token: usersWithToken,
+    rtdb_write: rtdbStatus,
+    users_with_fcm_token:    usersWithToken,
+    users_without_fcm_token: usersWithoutToken,
+    action_needed: usersWithToken === 0
+      ? '⚠️ No FCM tokens registered — all users must open v1.9 of the app first'
+      : `✅ ${usersWithToken} user(s) ready to receive calls`,
     recent_calls: recentCalls,
   });
 });

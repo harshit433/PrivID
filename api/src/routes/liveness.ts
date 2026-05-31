@@ -1,15 +1,56 @@
 import { Router, Request, Response } from 'express';
+import fs from 'fs';
+import path from 'path';
 import { livenessRegion, livenessIdentityPoolId, isLivenessConfigured } from '../services/rekognition';
 
 export const livenessRouter = Router();
 
+// ─── Static bundle location ──────────────────────────────────────────────────
+// The Face Liveness web app (React + Amplify + FaceLivenessDetector) is
+// pre-bundled into a single self-contained file by ../../../liveness-web and
+// committed to api/public. Serving one same-origin asset is far more reliable
+// inside a mobile WebView than loading the heavy Amplify SDK from a CDN at
+// runtime (that module waterfall stalls on real devices).
+function publicDir(): string {
+  const candidates = [
+    path.join(__dirname, '../../public'), // dist/routes -> api/public  (and src/routes -> api/public via tsx)
+    path.join(process.cwd(), 'public'),
+    path.join(process.cwd(), 'api/public'),
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, 'liveness.bundle.js'))) return dir;
+  }
+  return candidates[0];
+}
+
+function bundleVersion(): string {
+  try {
+    const stat = fs.statSync(path.join(publicDir(), 'liveness.bundle.js'));
+    return String(Math.floor(stat.mtimeMs));
+  } catch {
+    return '0';
+  }
+}
+
+// Serve the bundle + styles. Long-cache (immutable) — the HTML shell appends a
+// ?v=<mtime> cache-buster so a new deploy is always picked up.
+livenessRouter.get('/liveness.bundle.js', (_req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  res.sendFile(path.join(publicDir(), 'liveness.bundle.js'));
+});
+
+livenessRouter.get('/liveness.bundle.css', (_req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'text/css; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  res.sendFile(path.join(publicDir(), 'liveness.bundle.css'));
+});
+
 // ─── GET /liveness/web ──────────────────────────────────────────────────────────
-// Self-contained page that renders the official AWS Amplify FaceLivenessDetector.
-// It is loaded inside a react-native-webview during onboarding. The component
-// opens the camera, shows the oval + challenge instructions, records a short
-// selfie video and streams it straight to Amazon Rekognition (using temporary
-// credentials from the Cognito identity pool). When analysis finishes it posts
-// the outcome back to the React Native host via window.ReactNativeWebView.
+// HTML shell loaded inside react-native-webview during onboarding. It injects
+// the session config and loads the local bundle, which opens the camera, runs
+// the Amazon Rekognition Face Liveness challenge and posts the outcome back to
+// the React Native host via window.ReactNativeWebView.
 //
 // Query params:
 //   sessionId — the Rekognition SessionId from CreateFaceLivenessSession
@@ -22,117 +63,50 @@ livenessRouter.get('/web', (req: Request, res: Response) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
 
-  if (!isLivenessConfigured() || !identityPoolId) {
-    res.send(notConfiguredPage());
+  const bundleExists = fs.existsSync(path.join(publicDir(), 'liveness.bundle.js'));
+  if (!isLivenessConfigured() || !identityPoolId || !bundleExists) {
+    res.send(notConfiguredPage(!bundleExists ? 'BUNDLE_MISSING' : 'LIVENESS_NOT_CONFIGURED'));
     return;
   }
 
-  res.send(livenessPage({ sessionId, region, identityPoolId }));
+  res.send(livenessPage({ sessionId, region, identityPoolId, v: bundleVersion() }));
 });
 
-function notConfiguredPage(): string {
+function notConfiguredPage(reason: string): string {
   return `<!doctype html><html><head><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1"/>
 <style>body{margin:0;background:#05060F;color:#fff;font-family:-apple-system,Roboto,sans-serif;
 display:flex;align-items:center;justify-content:center;height:100vh;text-align:center;padding:24px}</style>
 </head><body><div>
-<h3>Liveness not configured</h3>
-<p style="color:#9aa0b4">Amazon Rekognition Face Liveness is not set up on the server.</p>
+<h3>Liveness not available</h3>
+<p style="color:#9aa0b4">Face Liveness is not set up on the server.</p>
 </div>
-<script>setTimeout(function(){if(window.ReactNativeWebView){window.ReactNativeWebView.postMessage(JSON.stringify({type:'error',message:'LIVENESS_NOT_CONFIGURED'}))}},300)</script>
+<script>setTimeout(function(){if(window.ReactNativeWebView){window.ReactNativeWebView.postMessage(JSON.stringify({type:'error',message:'${reason}'}))}},300)</script>
 </body></html>`;
 }
 
-function livenessPage(cfg: { sessionId: string; region: string; identityPoolId: string }): string {
-  const data = JSON.stringify(cfg);
+function livenessPage(cfg: { sessionId: string; region: string; identityPoolId: string; v: string }): string {
+  const data = JSON.stringify({ sessionId: cfg.sessionId, region: cfg.region, identityPoolId: cfg.identityPoolId });
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <title>Liveness check</title>
-<link rel="stylesheet" href="https://esm.sh/@aws-amplify/ui-react@6/styles.css" />
+<link rel="stylesheet" href="/liveness/liveness.bundle.css?v=${cfg.v}" />
 <style>
   html, body, #root { height: 100%; margin: 0; }
   body { background: #05060F; color: #fff; font-family: -apple-system, Roboto, sans-serif; overflow: hidden; }
   #loading { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; }
   .spinner { width: 36px; height: 36px; border: 3px solid rgba(255,255,255,0.2); border-top-color: #7C5CF6; border-radius: 50%; animation: spin 0.9s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  /* Tint the Amplify detector to the PrivID dark theme */
   [data-amplify-liveness-detector] { --amplify-colors-background-primary: #05060F; }
 </style>
 </head>
 <body>
 <div id="root"><div id="loading"><div class="spinner"></div><div id="status" style="color:#9aa0b4;text-align:center;padding:0 24px;line-height:1.4">Preparing camera…</div></div></div>
-<script type="module">
-  const CFG = ${data};
-  function post(msg) {
-    try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(msg)); } catch (e) {}
-  }
-  function setStatus(text) {
-    const s = document.getElementById('status');
-    if (s) s.textContent = text;
-  }
-  // Surface anything that would otherwise be a silent black screen.
-  window.addEventListener('error', (e) => {
-    setStatus('Script error: ' + (e && e.message ? e.message : 'unknown'));
-    post({ type: 'error', message: 'WINDOW_ERROR: ' + (e && e.message ? e.message : 'unknown') });
-  });
-  window.addEventListener('unhandledrejection', (e) => {
-    const m = (e && e.reason && (e.reason.message || e.reason.toString())) || 'unknown';
-    setStatus('Load/permission error: ' + m);
-  });
-
-  (async () => {
-    try {
-      setStatus('Loading verification engine…');
-      const React = (await import('https://esm.sh/react@18')).default;
-      const { createRoot } = await import('https://esm.sh/react-dom@18/client');
-      const { Amplify } = await import('https://esm.sh/aws-amplify@6');
-      const liveness = await import('https://esm.sh/@aws-amplify/ui-react-liveness@3?bundle&deps=aws-amplify@6,react@18,react-dom@18,@aws-amplify/ui-react@6');
-      const FaceLivenessDetector = liveness.FaceLivenessDetector;
-
-      setStatus('Requesting camera…');
-      // Prove camera access works (and trigger the WebView permission grant)
-      // before handing off to the detector, so failures are explicit.
-      try {
-        const test = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
-        test.getTracks().forEach((t) => t.stop());
-      } catch (camErr) {
-        setStatus('Camera blocked: ' + (camErr && camErr.name ? camErr.name : String(camErr)) + '. Allow camera access and retry.');
-        post({ type: 'error', message: 'CAMERA_DENIED: ' + (camErr && camErr.name ? camErr.name : String(camErr)) });
-        return;
-      }
-
-      Amplify.configure({
-        Auth: { Cognito: { identityPoolId: CFG.identityPoolId, allowGuestAccess: true } },
-      });
-
-      function App() {
-        return React.createElement(FaceLivenessDetector, {
-          sessionId: CFG.sessionId,
-          region: CFG.region,
-          disableStartScreen: true,
-          onAnalysisComplete: async () => { post({ type: 'complete' }); },
-          onError: (error) => {
-            const detail = (error && (error.state || error.error?.message || error.message)) || JSON.stringify(error);
-            setStatus('Detector error: ' + detail);
-            post({ type: 'error', message: 'DETECTOR: ' + detail });
-          },
-          onUserCancel: () => { post({ type: 'cancel' }); },
-        });
-      }
-
-      const el = document.getElementById('loading');
-      if (el) el.remove();
-      createRoot(document.getElementById('root')).render(React.createElement(App));
-    } catch (err) {
-      const m = err && err.message ? err.message : String(err);
-      setStatus('Failed to load: ' + m);
-      post({ type: 'error', message: 'LOAD_FAILED: ' + m });
-    }
-  })();
-</script>
+<script>window.__PRIVID_LIVENESS__ = ${data};</script>
+<script src="/liveness/liveness.bundle.js?v=${cfg.v}"></script>
 </body>
 </html>`;
 }

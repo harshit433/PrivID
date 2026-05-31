@@ -18,7 +18,7 @@ import { apiLimiter, publicLimiter } from './middleware/rateLimit';
 import { getPool } from '@privid/shared';
 import { isThreediviConfigured } from './services/threedivi';
 import { isStreamConfigured } from './services/stream';
-import { isLivenessConfigured } from './services/rekognition';
+import { isLivenessConfigured } from './services/liveness';
 
 const app = express();
 const PORT = parseInt(process.env.API_PORT ?? '3000', 10);
@@ -45,7 +45,7 @@ app.get('/health', async (_req, res) => {
       threedivi_configured: isThreediviConfigured(),
       threedivi_runner: process.env.THREEDIVI_RUNNER ?? 'auto',
       stream_chat_configured: isStreamConfigured(),
-      rekognition_liveness_configured: isLivenessConfigured(),
+      liveness_configured: isLivenessConfigured(),
     });
   } catch (err) {
     res.status(503).json({ ok: false, error: 'DB unavailable' });

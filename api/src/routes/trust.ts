@@ -5,13 +5,7 @@ import { query, queryOne, withTransaction, getRedis } from '@privid/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 import { recomputeAndPersist, computeTrustScore } from '../services/trustScore';
-import {
-  isLivenessConfigured,
-  createLivenessSession,
-  getLivenessResults,
-  livenessRegion,
-  livenessThreshold,
-} from '../services/rekognition';
+import { isLivenessConfigured, checkLiveness, livenessThreshold } from '../services/liveness';
 
 export const trustRouter = Router();
 
@@ -240,34 +234,26 @@ async function verifyDeviceIntegrityToken(_platform: string, _token: string): Pr
 }
 
 // ─── POST /trust/verify/liveness/initiate ─────────────────────────────────────
-// Creates an Amazon Rekognition Face Liveness session. The client renders the
-// FaceLivenessDetector (in a WebView) with the returned SessionId, which streams
-// the selfie video to Rekognition. We verify the outcome in /complete.
+// Creates a pending liveness factor and returns a provider_ref the client echoes
+// back on /complete together with the captured selfie. No external session is
+// needed — passive liveness is a single image check at /complete.
 
 trustRouter.post('/verify/liveness/initiate', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const configured = isLivenessConfigured();
-
-    // When configured, the provider_ref IS the Rekognition SessionId.
-    // In dev (no AWS creds / identity pool) we fall back to a random UUID and
-    // auto-pass on /complete so local development works without an AWS account.
-    const providerRef = configured ? await createLivenessSession() : crypto.randomUUID();
+    const providerRef = crypto.randomUUID();
 
     await query(
       `INSERT INTO trust_factors (user_id, factor_type, status, provider, provider_ref, score_delta, metadata)
-       VALUES ($1, 'liveness_check', 'pending', 'rekognition', $2, 25, $3)
+       VALUES ($1, 'liveness_check', 'pending', 'luxand', $2, 25, $3)
        ON CONFLICT (user_id, factor_type) WHERE is_latest = TRUE
        DO UPDATE SET
          provider_ref = EXCLUDED.provider_ref,
          status = 'pending',
-         provider = 'rekognition',
+         provider = 'luxand',
          metadata = EXCLUDED.metadata,
          verified_at = NULL`,
-      [
-        req.user!.sub,
-        providerRef,
-        JSON.stringify({ liveness_configured: configured }),
-      ]
+      [req.user!.sub, providerRef, JSON.stringify({ liveness_configured: configured })]
     );
 
     res.json({
@@ -275,7 +261,6 @@ trustRouter.post('/verify/liveness/initiate', requireAuth, async (req: Request, 
       data: {
         provider_ref: providerRef,
         liveness_enabled: configured,
-        region: livenessRegion(),
       },
     });
   } catch (err) {
@@ -284,17 +269,17 @@ trustRouter.post('/verify/liveness/initiate', requireAuth, async (req: Request, 
 });
 
 // ─── POST /trust/verify/liveness/complete ─────────────────────────────────────
-// Fetches the Rekognition Face Liveness result for the session and enforces the
-// confidence threshold. On failure the factor is marked 'failed' and the client
-// must not be allowed to proceed.
+// Receives the captured selfie (base64), runs passive liveness via the managed
+// provider and enforces the confidence threshold. On failure the factor is
+// marked 'failed' and the client must not be allowed to proceed.
 
 trustRouter.post('/verify/liveness/complete', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { provider_ref } = z
+    const { provider_ref, image } = z
       .object({
         provider_ref: z.string().min(8),
-        // Accepted for backwards-compatibility with older clients; ignored.
-        captures: z.array(z.string()).optional(),
+        // data URL or raw base64 of the captured JPEG selfie
+        image: z.string().min(100).optional(),
       })
       .parse(req.body);
 
@@ -311,51 +296,45 @@ trustRouter.post('/verify/liveness/complete', requireAuth, async (req: Request, 
 
     const configured = isLivenessConfigured();
     let passed: boolean;
-    let confidence: number;
-    let status: string;
+    let score: number;
 
     if (configured) {
-      // Rekognition can briefly report CREATED/IN_PROGRESS right after the client
-      // finishes streaming. Poll a few times before deciding it failed.
-      let result = await getLivenessResults(provider_ref).catch((err: Error) => {
+      if (!image) throw new AppError(400, 'IMAGE_REQUIRED', 'No selfie was provided for the liveness check.');
+      const b64 = image.includes(',') ? image.slice(image.indexOf(',') + 1) : image;
+      const buf = Buffer.from(b64, 'base64');
+      if (buf.length < 1024) throw new AppError(400, 'IMAGE_INVALID', 'The captured selfie was empty. Please try again.');
+
+      const result = await checkLiveness(buf).catch((err: Error) => {
         throw new AppError(502, 'LIVENESS_CHECK_FAILED', err.message);
       });
-      for (let i = 0; i < 5 && (result.status === 'CREATED' || result.status === 'IN_PROGRESS'); i++) {
-        await new Promise((r) => setTimeout(r, 800));
-        result = await getLivenessResults(provider_ref).catch(() => result);
-      }
-      status = result.status;
-      confidence = result.confidence;
-      passed = result.status === 'SUCCEEDED' && result.confidence >= livenessThreshold();
+      score = result.score;
+      passed = result.real;
       console.log(
-        `[liveness] complete session=${provider_ref} status=${status} confidence=${confidence} threshold=${livenessThreshold()} passed=${passed}`,
+        `[liveness] complete ref=${provider_ref} score=${score} threshold=${livenessThreshold()} passed=${passed}`,
       );
     } else {
-      // Dev bypass — no AWS configured.
-      status = 'SUCCEEDED';
-      confidence = 100;
+      // Dev bypass — no provider token configured.
+      score = 1;
       passed = true;
     }
 
     if (!passed) {
       await query(
         `UPDATE trust_factors SET status = 'failed', metadata = metadata || $2::jsonb WHERE factor_id = $1`,
-        [factor.factor_id, JSON.stringify({ status, confidence })]
+        [factor.factor_id, JSON.stringify({ score })]
       );
-      const hint =
-        status === 'EXPIRED'
-          ? 'The liveness session expired. Please try again.'
-          : status === 'CREATED' || status === 'IN_PROGRESS'
-            ? 'No camera video was received. Make sure the camera opened and the check completed, then try again.'
-            : `Liveness check did not pass (${status}). Use good lighting, hold steady, and make sure it is a live person.`;
-      throw new AppError(400, 'LIVENESS_FAILED', hint);
+      throw new AppError(
+        400,
+        'LIVENESS_FAILED',
+        'Liveness check did not pass. Use good lighting, look straight at the camera, and make sure it is a live person (not a photo or screen).'
+      );
     }
 
     await query(
       `UPDATE trust_factors
        SET status = 'completed', verified_at = NOW(), metadata = metadata || $2::jsonb
        WHERE factor_id = $1`,
-      [factor.factor_id, JSON.stringify({ status, confidence })]
+      [factor.factor_id, JSON.stringify({ score })]
     );
 
     const breakdown = await recomputeAndPersist(req.user!.sub);
@@ -364,7 +343,7 @@ trustRouter.post('/verify/liveness/complete', requireAuth, async (req: Request, 
       data: {
         score: breakdown.total,
         tier: breakdown.tier,
-        liveness: { status, confidence },
+        liveness: { score },
       },
     });
   } catch (err) {

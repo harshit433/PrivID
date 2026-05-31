@@ -215,53 +215,46 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
     // ── RTDB: write initial call state (fire-and-forget) ─────────────────────
     rtdbCreateCall(call.call_id, callerId, calleeId).catch(() => {});
 
-    // ── Push notification to callee ───────────────────────────────────────────
-    // Fire-and-forget — never block the call initiation response on this
-    queryOne<{
-      push_token: string | null;
-      handle: string;
-      display_name: string | null;
-      trust_tier: string;
-      trust_score: number;
-      avatar_url: string | null;
-    }>(
-      `SELECT u.handle, u.display_name, u.trust_tier, u.trust_score, u.avatar_url,
-              dr.push_token
-       FROM users u
-       LEFT JOIN device_registrations dr
-         ON dr.user_id = u.user_id
-       WHERE u.user_id = $1
-       ORDER BY dr.last_seen_at DESC NULLS LAST
-       LIMIT 1`,
-      [callerId],
-    ).then(async (caller) => {
-      const tokenRow = await queryOne<{ push_token: string | null }>(
-        `SELECT push_token FROM device_registrations
-         WHERE user_id = $1 AND push_token IS NOT NULL
-         ORDER BY last_seen_at DESC NULLS LAST LIMIT 1`,
-        [calleeId],
-      );
-      if (!tokenRow?.push_token || !caller) return;
+    // ── FCM push to callee ────────────────────────────────────────────────────
+    // Single query: get caller info + callee's FCM token + connection type
+    ;(async () => {
+      try {
+        const [caller, callee, conn] = await Promise.all([
+          queryOne<{ handle: string; display_name: string | null; trust_tier: string; trust_score: number; avatar_url: string | null }>(
+            `SELECT handle, display_name, trust_tier, trust_score, avatar_url FROM users WHERE user_id = $1`,
+            [callerId],
+          ),
+          queryOne<{ fcm_token: string | null }>(
+            `SELECT fcm_token FROM users WHERE user_id = $1`,
+            [calleeId],
+          ),
+          queryOne<{ connection_type: string }>(
+            `SELECT connection_type FROM connections WHERE owner_id = $1 AND contact_id = $2`,
+            [calleeId, callerId],
+          ),
+        ]);
 
-      // Also get callee's connection type from callee's perspective
-      const conn = await queryOne<{ connection_type: string }>(
-        `SELECT connection_type FROM connections WHERE owner_id = $1 AND contact_id = $2`,
-        [calleeId, callerId],
-      );
+        if (!callee?.fcm_token) {
+          console.warn(`[calls] No FCM token for callee ${calleeId} — push skipped`);
+          return;
+        }
+        if (!caller) return;
 
-      await sendIncomingCallPush(tokenRow.push_token, {
-        callId:        call.call_id,
-        fromUserId:    callerId,
-        handle:        caller.handle,
-        displayName:   caller.display_name ?? caller.handle,
-        avatarUrl:     caller.avatar_url   ?? undefined,
-        trustTier:     caller.trust_tier,
-        trustScore:    caller.trust_score,
-        connectionType: conn?.connection_type,
-      });
-    }).catch((err: Error) => {
-      console.warn('[calls] FCM push failed (non-fatal):', err?.message);
-    });
+        await sendIncomingCallPush(callee.fcm_token, {
+          callId:         call.call_id,
+          fromUserId:     callerId,
+          handle:         caller.handle,
+          displayName:    caller.display_name ?? caller.handle,
+          avatarUrl:      caller.avatar_url   ?? undefined,
+          trustTier:      caller.trust_tier,
+          trustScore:     caller.trust_score,
+          connectionType: conn?.connection_type,
+        });
+        console.log(`[calls] FCM push sent to ${calleeId} for call ${call.call_id}`);
+      } catch (err: any) {
+        console.warn('[calls] FCM push error:', err?.message);
+      }
+    })();
 
     res.status(201).json({
       ok: true,

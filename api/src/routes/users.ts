@@ -316,9 +316,7 @@ usersRouter.get('/:handle', requireAuth, async (req: Request, res: Response, nex
 });
 
 // ─── PUT /users/me/push-token ─────────────────────────────────────────────────
-// Called by the mobile app whenever a new FCM token is issued.
-// Stores it against the most-recently-seen device_registration row.
-// If no device_registration exists yet, creates a minimal one.
+// Store FCM token directly on the users row — simple, reliable, no joins needed.
 
 usersRouter.put('/me/push-token', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -326,24 +324,10 @@ usersRouter.put('/me/push-token', requireAuth, async (req: Request, res: Respons
       push_token: z.string().min(10),
     }).parse(req.body);
 
-    // Upsert: update existing registration if present, otherwise insert new row
     await query(
-      `INSERT INTO device_registrations (user_id, platform, push_token, last_seen_at)
-       VALUES ($1, 'android', $2, NOW())
-       ON CONFLICT (user_id, hardware_id)
-       DO UPDATE SET push_token = EXCLUDED.push_token, last_seen_at = NOW()`,
+      `UPDATE users SET fcm_token = $2 WHERE user_id = $1`,
       [req.user!.sub, push_token],
-    ).catch(async () => {
-      // No hardware_id — fallback: update the latest row directly
-      await query(
-        `UPDATE device_registrations
-         SET push_token = $2, last_seen_at = NOW()
-         WHERE user_id = $1 AND last_seen_at = (
-           SELECT MAX(last_seen_at) FROM device_registrations WHERE user_id = $1
-         )`,
-        [req.user!.sub, push_token],
-      );
-    });
+    );
 
     res.json({ ok: true });
   } catch (err) {

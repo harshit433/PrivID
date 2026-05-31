@@ -6,6 +6,7 @@ import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 import { callLimiter } from '../middleware/rateLimit';
 import { trackEvent } from '../services/behavior';
+import { sendIncomingCallPush } from '../services/fcm';
 import crypto from 'crypto';
 import { AccessToken } from 'livekit-server-sdk';
 
@@ -189,7 +190,53 @@ callsRouter.post('/initiate', requireAuth, callLimiter, async (req: Request, res
     // Track behavior event
     await trackEvent(callerId, 'call_initiated', calleeId, { call_id: call.call_id, call_type: callType });
 
-    // TODO: push notification to callee via FCM/APNs
+    // ── Push notification to callee ───────────────────────────────────────────
+    // Fire-and-forget — never block the call initiation response on this
+    queryOne<{
+      push_token: string | null;
+      handle: string;
+      display_name: string | null;
+      trust_tier: string;
+      trust_score: number;
+      avatar_url: string | null;
+    }>(
+      `SELECT u.handle, u.display_name, u.trust_tier, u.trust_score, u.avatar_url,
+              dr.push_token
+       FROM users u
+       LEFT JOIN device_registrations dr
+         ON dr.user_id = u.user_id
+       WHERE u.user_id = $1
+       ORDER BY dr.last_seen_at DESC NULLS LAST
+       LIMIT 1`,
+      [callerId],
+    ).then(async (caller) => {
+      const tokenRow = await queryOne<{ push_token: string | null }>(
+        `SELECT push_token FROM device_registrations
+         WHERE user_id = $1 AND push_token IS NOT NULL
+         ORDER BY last_seen_at DESC NULLS LAST LIMIT 1`,
+        [calleeId],
+      );
+      if (!tokenRow?.push_token || !caller) return;
+
+      // Also get callee's connection type from callee's perspective
+      const conn = await queryOne<{ connection_type: string }>(
+        `SELECT connection_type FROM connections WHERE owner_id = $1 AND contact_id = $2`,
+        [calleeId, callerId],
+      );
+
+      await sendIncomingCallPush(tokenRow.push_token, {
+        callId:        call.call_id,
+        fromUserId:    callerId,
+        handle:        caller.handle,
+        displayName:   caller.display_name ?? caller.handle,
+        avatarUrl:     caller.avatar_url   ?? undefined,
+        trustTier:     caller.trust_tier,
+        trustScore:    caller.trust_score,
+        connectionType: conn?.connection_type,
+      });
+    }).catch((err: Error) => {
+      console.warn('[calls] FCM push failed (non-fatal):', err?.message);
+    });
 
     res.status(201).json({
       ok: true,

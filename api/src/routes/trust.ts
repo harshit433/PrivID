@@ -8,6 +8,7 @@ import { recomputeAndPersist, computeTrustScore } from '../services/trustScore';
 import { isLivenessConfigured, checkLiveness, livenessThreshold } from '../services/liveness';
 import { verifyAndroidIntegrityToken } from '../services/playIntegrity';
 import { logger } from '../utils/logger';
+import { phonesMatch } from '../utils/phoneMatch';
 
 export const trustRouter = Router();
 
@@ -110,8 +111,210 @@ trustRouter.post('/verify/phone', requireAuth, async (req: Request, res: Respons
   }
 });
 
+// ─── POST /trust/verify/device/root ───────────────────────────────────────────
+// Step 1 — rooted / tampered device check (definitive indicators only).
+
+const rootCheckSchema = z.object({
+  indicators: z.array(z.string()).default([]),
+  is_emulator: z.boolean().default(false),
+});
+
+trustRouter.post('/verify/device/root', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = rootCheckSchema.parse(req.body);
+    const definitive = body.indicators.filter((i) => !i.endsWith('_info'));
+
+    if (process.env.NODE_ENV === 'production') {
+      if (body.is_emulator) {
+        throw new AppError(400, 'DEVICE_EMULATOR', 'Emulators are not permitted for verification.');
+      }
+      if (definitive.length > 0) {
+        throw new AppError(
+          400,
+          'DEVICE_ROOTED',
+          'This device appears rooted or tampered. PrivID requires a standard, unmodified device.',
+        );
+      }
+    }
+
+    res.json({ ok: true, data: { passed: true, indicators: body.indicators } });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
+// ─── POST /trust/verify/device/integrity ───────────────────────────────────────
+// Step 2 — Google Play Integrity (Android) or DeviceCheck (iOS).
+
+const integrityVerifySchema = z.object({
+  platform: z.enum(['android', 'ios']),
+  integrity_token: z.string().min(10),
+  nonce: z.string().min(10),
+});
+
+trustRouter.post('/verify/device/integrity', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = integrityVerifySchema.parse(req.body);
+
+    const redis = getRedis();
+    const nonceKey = `integrity_nonce:${req.user!.sub}:${body.nonce}`;
+    const valid = await redis.getdel(nonceKey);
+    if (!valid) {
+      throw new AppError(400, 'INVALID_NONCE', 'Integrity nonce is invalid or expired. Please retry.');
+    }
+
+    const isVerified =
+      process.env.NODE_ENV !== 'production'
+        ? true
+        : await verifyDeviceIntegrityToken(body.platform, body.integrity_token);
+
+    if (!isVerified) {
+      throw new AppError(
+        400,
+        'DEVICE_INTEGRITY_FAILED',
+        'Google Play Integrity could not verify this install. Install from Google Play or a registered test build.',
+      );
+    }
+
+    res.json({ ok: true, data: { verified: true } });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
+// ─── GET /trust/verify/device/network ─────────────────────────────────────────
+// Step 3 — authenticated HTTPS round-trip (TLS terminates before this handler).
+
+trustRouter.get('/verify/device/network', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const secure =
+      req.secure ||
+      req.headers['x-forwarded-proto'] === 'https' ||
+      process.env.NODE_ENV !== 'production';
+
+    if (!secure && process.env.NODE_ENV === 'production') {
+      throw new AppError(400, 'INSECURE_CONNECTION', 'Connection must use HTTPS.');
+    }
+
+    res.json({
+      ok: true,
+      data: {
+        secure_connection: secure,
+        authenticated: true,
+        server_time: new Date().toISOString(),
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── POST /trust/verify/device/sim-bind ───────────────────────────────────────
+// Step 4 — SIM phone must match the OTP-verified number on the account.
+
+const simBindSchema = z.object({
+  platform: z.enum(['android', 'ios']).default('android'),
+  sim_numbers: z.array(z.string()).min(1, 'No SIM phone numbers reported'),
+  hardware_id: z.string().min(1),
+  device_fingerprint: z.string().optional(),
+  push_token: z.string().optional(),
+});
+
+async function completeDeviceRegistration(
+  userId: string,
+  body: {
+    platform: 'android' | 'ios';
+    hardware_id: string;
+    device_fingerprint?: string;
+    push_token?: string;
+    integrity_token?: string;
+  },
+): Promise<{ score: number; tier: string }> {
+  await withTransaction(async (client) => {
+    await client.query(
+      `INSERT INTO device_registrations
+         (user_id, platform, integrity_token, push_token, hardware_id, device_fingerprint)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT DO NOTHING`,
+      [
+        userId,
+        body.platform,
+        body.integrity_token ?? null,
+        body.push_token ?? null,
+        body.hardware_id,
+        body.device_fingerprint ?? null,
+      ],
+    );
+
+    await client.query(
+      `UPDATE device_registrations
+       SET device_fingerprint = $3, push_token = COALESCE($4, push_token), last_seen_at = NOW()
+       WHERE user_id = $1 AND hardware_id = $2`,
+      [userId, body.hardware_id, body.device_fingerprint ?? null, body.push_token ?? null],
+    );
+
+    await client.query(
+      `INSERT INTO trust_factors (user_id, factor_type, status, provider, score_delta, verified_at)
+       VALUES ($1, 'device_integrity', 'completed', $2, 10, NOW())
+       ON CONFLICT (user_id, factor_type) WHERE is_latest = TRUE
+       DO UPDATE SET status = 'completed', verified_at = NOW(), provider = EXCLUDED.provider`,
+      [userId, body.platform === 'android' ? 'play_integrity' : 'device_check'],
+    );
+  });
+
+  const breakdown = await recomputeAndPersist(userId);
+  return { score: breakdown.total, tier: breakdown.tier };
+}
+
+trustRouter.post('/verify/device/sim-bind', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = simBindSchema.parse(req.body);
+
+    const user = await queryOne<{ phone_e164: string }>(
+      `SELECT phone_e164 FROM users WHERE user_id = $1`,
+      [req.user!.sub],
+    );
+    if (!user?.phone_e164) {
+      throw new AppError(400, 'PHONE_NOT_FOUND', 'Verified phone number not found on your account.');
+    }
+
+    const matched = body.sim_numbers.some((n) => phonesMatch(n, user.phone_e164));
+    if (!matched) {
+      throw new AppError(
+        400,
+        'SIM_PHONE_MISMATCH',
+        'The phone number on this SIM does not match the number you verified with OTP.',
+      );
+    }
+
+    const existing = await queryOne<{ user_id: string }>(
+      `SELECT user_id FROM device_registrations
+       WHERE hardware_id = $1 AND user_id != $2
+       LIMIT 1`,
+      [body.hardware_id, req.user!.sub],
+    );
+    if (existing) {
+      logger.warn('trust', `hardware_id ${body.hardware_id} was previously bound to user ${existing.user_id}`);
+    }
+
+    const result = await completeDeviceRegistration(req.user!.sub, {
+      platform: body.platform,
+      hardware_id: body.hardware_id,
+      device_fingerprint: body.device_fingerprint,
+      push_token: body.push_token,
+    });
+
+    res.json({ ok: true, data: { ...result, sim_bound: true } });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
 // ─── POST /trust/verify/device ────────────────────────────────────────────────
-// Validates Play Integrity (Android) or DeviceCheck (iOS) token
+// Legacy combined endpoint — prefer the step-specific routes above.
 
 const deviceVerifySchema = z.object({
   platform: z.enum(['android', 'ios']),

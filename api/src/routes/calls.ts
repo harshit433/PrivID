@@ -6,7 +6,7 @@ import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 // callLimiter intentionally not imported — trusted contacts bypass all rate limits
 import { trackEvent } from '../services/behavior';
-import { sendIncomingCallPush } from '../services/fcm';
+import { sendIncomingCallPush, rtdbCreateCall, rtdbUpdateStatus } from '../services/fcm';
 import crypto from 'crypto';
 import { AccessToken } from 'livekit-server-sdk';
 
@@ -212,6 +212,9 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
     // Track behavior event
     await trackEvent(callerId, 'call_initiated', calleeId, { call_id: call.call_id, call_type: callType });
 
+    // ── RTDB: write initial call state (fire-and-forget) ─────────────────────
+    rtdbCreateCall(call.call_id, callerId, calleeId).catch(() => {});
+
     // ── Push notification to callee ───────────────────────────────────────────
     // Fire-and-forget — never block the call initiation response on this
     queryOne<{
@@ -292,6 +295,9 @@ callsRouter.post('/:id/answer', requireAuth, async (req: Request, res: Response,
       [req.params.id]
     );
 
+    // Signal caller instantly — their OutboundCallingScreen transitions to active
+    rtdbUpdateStatus(req.params.id, 'answered').catch(() => {});
+
     res.json({ ok: true, data: { call_id: updated.call_id, status: updated.status, webrtc_room_id: updated.webrtc_room_id } });
   } catch (err) {
     next(err);
@@ -302,7 +308,10 @@ callsRouter.post('/:id/answer', requireAuth, async (req: Request, res: Response,
 
 callsRouter.post('/:id/end', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { reason } = z.object({ reason: z.enum(['declined', 'ended', 'failed']).default('ended') }).parse(req.body);
+    // 'missed' = caller cancelled / timeout; added alongside declined/ended/failed
+    const { reason } = z.object({
+      reason: z.enum(['declined', 'ended', 'failed', 'missed']).default('ended'),
+    }).parse(req.body);
 
     const call = await queryOne<CallRow>(
       `SELECT * FROM calls WHERE call_id = $1 AND (caller_id = $2 OR callee_id = $2)`,
@@ -323,6 +332,11 @@ callsRouter.post('/:id/end', requireAuth, async (req: Request, res: Response, ne
        RETURNING *`,
       [finalStatus, durationSeconds, req.params.id]
     );
+
+    // ── RTDB: signal the other device instantly ───────────────────────────────
+    // This fires in < 100ms on the other device's active listener.
+    // No polling needed anywhere in the app.
+    rtdbUpdateStatus(req.params.id, finalStatus as any).catch(() => {});
 
     res.json({ ok: true, data: { call_id: updated.call_id, status: updated.status, duration_seconds: updated.duration_seconds } });
   } catch (err) {

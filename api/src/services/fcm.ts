@@ -1,97 +1,157 @@
 /**
- * fcm.ts — Firebase Cloud Messaging service
+ * fcm.ts — Firebase services: Cloud Messaging + Realtime Database
  *
- * Sends high-priority data push notifications to Android devices.
- * Used exclusively for incoming call notifications so the device
- * wakes up regardless of whether the app is foreground/background/killed.
+ * FCM: high-priority push to wake devices for incoming calls
+ * RTDB: real-time call state signaling (sub-100ms, no polling needed)
  *
- * Environment variable:
- *   FIREBASE_SERVICE_ACCOUNT_JSON  full contents of the Firebase service
- *                                  account JSON (from Firebase Console →
- *                                  Project Settings → Service Accounts →
- *                                  Generate new private key)
- *
- * Fail-open: if FCM is not configured the function logs a warning and
- * returns without throwing — the app falls back to its 3s polling loop.
+ * Environment variables:
+ *   FIREBASE_SERVICE_ACCOUNT_JSON   full service account JSON
+ *   FIREBASE_DATABASE_URL           RTDB URL  (e.g. https://privid-cb3bf-default-rtdb.firebaseio.com)
  */
 
 import admin from 'firebase-admin';
 
-// ── Lazy singleton init ───────────────────────────────────────────────────────
+// ── Singleton init ────────────────────────────────────────────────────────────
 
 let _initialised = false;
 
 function getApp(): admin.app.App | null {
   if (_initialised) return admin.apps[0] ?? null;
 
-  const raw = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  const raw    = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  const dbUrl  = process.env.FIREBASE_DATABASE_URL ?? 'https://privid-cb3bf-default-rtdb.firebaseio.com';
+
   if (!raw) {
-    console.warn('[FCM] FIREBASE_SERVICE_ACCOUNT_JSON not set — push notifications disabled');
+    console.warn('[Firebase] FIREBASE_SERVICE_ACCOUNT_JSON not set — FCM + RTDB disabled');
     _initialised = true;
     return null;
   }
 
   try {
     const serviceAccount = JSON.parse(raw);
-    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+    admin.initializeApp({
+      credential:  admin.credential.cert(serviceAccount),
+      databaseURL: dbUrl,
+    });
     _initialised = true;
-    console.log('[FCM] Firebase Admin SDK initialised');
+    console.log('[Firebase] Admin SDK initialised (FCM + RTDB)');
     return admin.apps[0] ?? null;
   } catch (err: any) {
-    console.error('[FCM] Failed to init Firebase Admin:', err?.message);
+    console.error('[Firebase] Failed to init Admin SDK:', err?.message);
     _initialised = true;
     return null;
   }
 }
 
-// ── Public API ─────────────────────────────────────────────────────────────────
+function getDb(): admin.database.Database | null {
+  const app = getApp();
+  if (!app) return null;
+  try { return admin.database(); } catch { return null; }
+}
+
+// ── RTDB — Call Signaling ─────────────────────────────────────────────────────
+
+export type CallSignalStatus =
+  | 'ringing'   // call created, waiting for callee
+  | 'answered'  // callee answered — LiveKit takes over
+  | 'declined'  // callee explicitly declined
+  | 'missed'    // caller cancelled / 45s timeout
+  | 'ended'     // active call ended by either party
+  | 'failed';   // connection/system error
+
+/**
+ * Write initial call entry to RTDB when a call is initiated.
+ * Both devices subscribe to this path — any status change arrives instantly.
+ */
+export async function rtdbCreateCall(
+  callId:   string,
+  callerId: string,
+  calleeId: string,
+): Promise<void> {
+  const db = getDb();
+  if (!db) return;
+  try {
+    await db.ref(`calls/${callId}`).set({
+      status:     'ringing',
+      caller_id:  callerId,
+      callee_id:  calleeId,
+      created_at: Date.now(),
+    });
+  } catch (err: any) {
+    console.warn('[RTDB] rtdbCreateCall failed:', err?.message);
+  }
+}
+
+/**
+ * Update call status. Both caller and callee subscriptions fire immediately.
+ */
+export async function rtdbUpdateStatus(
+  callId: string,
+  status: CallSignalStatus,
+): Promise<void> {
+  const db = getDb();
+  if (!db) return;
+  try {
+    await db.ref(`calls/${callId}`).update({
+      status,
+      updated_at: Date.now(),
+    });
+    // Auto-delete 60s after terminal state to keep RTDB clean
+    const terminal: CallSignalStatus[] = ['declined', 'missed', 'ended', 'failed'];
+    if (terminal.includes(status)) {
+      setTimeout(async () => {
+        try { await db.ref(`calls/${callId}`).remove(); } catch { /* ignore */ }
+      }, 60_000);
+    }
+  } catch (err: any) {
+    console.warn('[RTDB] rtdbUpdateStatus failed:', err?.message);
+  }
+}
+
+// ── FCM — Incoming call wakeup push ──────────────────────────────────────────
 
 export interface IncomingCallPayload {
-  callId:        string;
-  fromUserId:    string;
-  handle:        string;
-  displayName:   string;
-  avatarUrl?:    string;
-  trustTier:     string;
-  trustScore:    number;
+  callId:         string;
+  fromUserId:     string;
+  handle:         string;
+  displayName:    string;
+  avatarUrl?:     string;
+  trustTier:      string;
+  trustScore:     number;
   connectionType?: string;
 }
 
 /**
- * Send a high-priority incoming-call push to a specific FCM token.
- * Uses a data-only message so the app can handle it even when killed
- * and show its own full-screen call UI via notifee.
+ * Send a high-priority data-only FCM push to wake the callee's device.
+ * RTDB handles real-time state after the device is awake.
  */
 export async function sendIncomingCallPush(
   fcmToken: string,
-  payload: IncomingCallPayload,
+  payload:  IncomingCallPayload,
 ): Promise<void> {
   const app = getApp();
-  if (!app) return;   // FCM not configured — silent fallback
-
+  if (!app) return;
   try {
     await app.messaging().send({
       token: fcmToken,
-      // data-only = no system tray notification; our app handles it
       data: {
         type:            'incoming_call',
         call_id:         payload.callId,
         from_user_id:    payload.fromUserId,
         handle:          payload.handle,
         display_name:    payload.displayName,
-        avatar_url:      payload.avatarUrl   ?? '',
+        avatar_url:      payload.avatarUrl    ?? '',
         trust_tier:      payload.trustTier,
         trust_score:     String(payload.trustScore),
         connection_type: payload.connectionType ?? '',
       },
       android: {
-        priority: 'high',         // wakes device from doze
-        ttl: 30_000,              // 30s — call will have expired after that
+        priority: 'high',
+        ttl:      30_000,
       },
     });
-    console.log(`[FCM] Incoming call push sent for call ${payload.callId}`);
+    console.log(`[FCM] Wakeup push sent → call ${payload.callId}`);
   } catch (err: any) {
-    // Token may be stale — not fatal
-    console.warn(`[FCM] Push send failed: ${err?.message}`);
+    console.warn(`[FCM] Push failed: ${err?.message}`);
   }
 }

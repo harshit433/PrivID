@@ -575,7 +575,29 @@ authRouter.post('/msg91/verify', async (req: Request, res: Response, next: NextF
 
 authRouter.post('/complete-onboarding', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const userId = req.user!.user_id;
+    const userId = req.user!.sub;
+
+    const factors = await query<{ factor_type: string; status: string }>(
+      `SELECT factor_type, status FROM trust_factors
+       WHERE user_id = $1 AND is_latest = TRUE`,
+      [userId]
+    );
+    const byType = Object.fromEntries(factors.map((f) => [f.factor_type, f.status]));
+    const required: Array<{ type: string; label: string }> = [
+      { type: 'phone_verified', label: 'Phone verification' },
+      { type: 'device_integrity', label: 'Device verification' },
+      { type: 'liveness_check', label: 'Liveness check' },
+    ];
+    for (const step of required) {
+      if (byType[step.type] !== 'completed') {
+        throw new AppError(
+          400,
+          'ONBOARDING_INCOMPLETE',
+          `${step.label} must be completed before finishing setup.`
+        );
+      }
+    }
+
     await query(
       `UPDATE users SET onboarding_complete = TRUE, updated_at = NOW() WHERE user_id = $1`,
       [userId]

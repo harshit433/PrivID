@@ -4,7 +4,7 @@ import { query, queryOne, withTransaction } from '@privid/shared';
 import type { CallRow, ConnectionRow, ReachabilityChannelRow } from '@privid/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
-import { callLimiter } from '../middleware/rateLimit';
+// callLimiter intentionally not imported — trusted contacts bypass all rate limits
 import { trackEvent } from '../services/behavior';
 import { sendIncomingCallPush } from '../services/fcm';
 import crypto from 'crypto';
@@ -41,7 +41,10 @@ const initiateSchema = z.object({
   message: 'Either callee_id or channel_token is required.',
 });
 
-callsRouter.post('/initiate', requireAuth, callLimiter, async (req: Request, res: Response, next: NextFunction) => {
+// NOTE: callLimiter removed — trusted contacts must have zero restrictions.
+// Rate limiting for unknown callers is handled inside the handler after
+// connection type is resolved.
+callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = initiateSchema.parse(req.body);
     const callerId = req.user!.sub;
@@ -134,6 +137,25 @@ callsRouter.post('/initiate', requireAuth, callLimiter, async (req: Request, res
         );
         if (parseInt(countRow.count, 10) >= dailyLimit) {
           throw new AppError(429, 'DAILY_LIMIT_REACHED', 'Daily call limit reached for this contact. Try again tomorrow.');
+        }
+
+        // Unknown callers only: global rate limit (30 unknown calls / 10 min)
+        // This is the ONLY rate limit applied — trusted contacts are never throttled.
+        if (connType === 'unknown') {
+          try {
+            const { getRedis } = await import('@privid/shared');
+            const redis = getRedis();
+            const rlKey = `call_unknown:${callerId}`;
+            const count = await redis.incr(rlKey);
+            if (count === 1) await redis.expire(rlKey, 600);
+            if (count > 30) {
+              throw new AppError(429, 'CALL_RATE_LIMITED',
+                'Too many calls to new contacts. Please wait a few minutes.');
+            }
+          } catch (e) {
+            if (e instanceof AppError) throw e;
+            // Redis unavailable — fail open
+          }
         }
 
         // Unknown — dynamic cooldown based on answer history

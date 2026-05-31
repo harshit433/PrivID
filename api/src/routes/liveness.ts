@@ -63,19 +63,46 @@ function livenessPage(cfg: { sessionId: string; region: string; identityPoolId: 
 </style>
 </head>
 <body>
-<div id="root"><div id="loading"><div class="spinner"></div><div style="color:#9aa0b4">Preparing camera…</div></div></div>
+<div id="root"><div id="loading"><div class="spinner"></div><div id="status" style="color:#9aa0b4;text-align:center;padding:0 24px;line-height:1.4">Preparing camera…</div></div></div>
 <script type="module">
   const CFG = ${data};
   function post(msg) {
     try { window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify(msg)); } catch (e) {}
   }
+  function setStatus(text) {
+    const s = document.getElementById('status');
+    if (s) s.textContent = text;
+  }
+  // Surface anything that would otherwise be a silent black screen.
+  window.addEventListener('error', (e) => {
+    setStatus('Script error: ' + (e && e.message ? e.message : 'unknown'));
+    post({ type: 'error', message: 'WINDOW_ERROR: ' + (e && e.message ? e.message : 'unknown') });
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    const m = (e && e.reason && (e.reason.message || e.reason.toString())) || 'unknown';
+    setStatus('Load/permission error: ' + m);
+  });
+
   (async () => {
     try {
+      setStatus('Loading verification engine…');
       const React = (await import('https://esm.sh/react@18')).default;
       const { createRoot } = await import('https://esm.sh/react-dom@18/client');
       const { Amplify } = await import('https://esm.sh/aws-amplify@6');
       const liveness = await import('https://esm.sh/@aws-amplify/ui-react-liveness@3?bundle&deps=aws-amplify@6,react@18,react-dom@18,@aws-amplify/ui-react@6');
       const FaceLivenessDetector = liveness.FaceLivenessDetector;
+
+      setStatus('Requesting camera…');
+      // Prove camera access works (and trigger the WebView permission grant)
+      // before handing off to the detector, so failures are explicit.
+      try {
+        const test = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+        test.getTracks().forEach((t) => t.stop());
+      } catch (camErr) {
+        setStatus('Camera blocked: ' + (camErr && camErr.name ? camErr.name : String(camErr)) + '. Allow camera access and retry.');
+        post({ type: 'error', message: 'CAMERA_DENIED: ' + (camErr && camErr.name ? camErr.name : String(camErr)) });
+        return;
+      }
 
       Amplify.configure({
         Auth: { Cognito: { identityPoolId: CFG.identityPoolId, allowGuestAccess: true } },
@@ -87,7 +114,11 @@ function livenessPage(cfg: { sessionId: string; region: string; identityPoolId: 
           region: CFG.region,
           disableStartScreen: true,
           onAnalysisComplete: async () => { post({ type: 'complete' }); },
-          onError: (error) => { post({ type: 'error', message: (error && error.state) || String(error) }); },
+          onError: (error) => {
+            const detail = (error && (error.state || error.error?.message || error.message)) || JSON.stringify(error);
+            setStatus('Detector error: ' + detail);
+            post({ type: 'error', message: 'DETECTOR: ' + detail });
+          },
           onUserCancel: () => { post({ type: 'cancel' }); },
         });
       }
@@ -96,7 +127,9 @@ function livenessPage(cfg: { sessionId: string; region: string; identityPoolId: 
       if (el) el.remove();
       createRoot(document.getElementById('root')).render(React.createElement(App));
     } catch (err) {
-      post({ type: 'error', message: 'LOAD_FAILED: ' + (err && err.message ? err.message : String(err)) });
+      const m = err && err.message ? err.message : String(err);
+      setStatus('Failed to load: ' + m);
+      post({ type: 'error', message: 'LOAD_FAILED: ' + m });
     }
   })();
 </script>

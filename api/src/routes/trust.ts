@@ -315,12 +315,21 @@ trustRouter.post('/verify/liveness/complete', requireAuth, async (req: Request, 
     let status: string;
 
     if (configured) {
-      const result = await getLivenessResults(provider_ref).catch((err: Error) => {
+      // Rekognition can briefly report CREATED/IN_PROGRESS right after the client
+      // finishes streaming. Poll a few times before deciding it failed.
+      let result = await getLivenessResults(provider_ref).catch((err: Error) => {
         throw new AppError(502, 'LIVENESS_CHECK_FAILED', err.message);
       });
+      for (let i = 0; i < 5 && (result.status === 'CREATED' || result.status === 'IN_PROGRESS'); i++) {
+        await new Promise((r) => setTimeout(r, 800));
+        result = await getLivenessResults(provider_ref).catch(() => result);
+      }
       status = result.status;
       confidence = result.confidence;
       passed = result.status === 'SUCCEEDED' && result.confidence >= livenessThreshold();
+      console.log(
+        `[liveness] complete session=${provider_ref} status=${status} confidence=${confidence} threshold=${livenessThreshold()} passed=${passed}`,
+      );
     } else {
       // Dev bypass — no AWS configured.
       status = 'SUCCEEDED';
@@ -336,7 +345,9 @@ trustRouter.post('/verify/liveness/complete', requireAuth, async (req: Request, 
       const hint =
         status === 'EXPIRED'
           ? 'The liveness session expired. Please try again.'
-          : 'Liveness check did not pass. Use good lighting, hold steady, and make sure it is a live person.';
+          : status === 'CREATED' || status === 'IN_PROGRESS'
+            ? 'No camera video was received. Make sure the camera opened and the check completed, then try again.'
+            : `Liveness check did not pass (${status}). Use good lighting, hold steady, and make sure it is a live person.`;
       throw new AppError(400, 'LIVENESS_FAILED', hint);
     }
 

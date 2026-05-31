@@ -4,6 +4,7 @@ import { query, queryOne, withTransaction } from '@privid/shared';
 import type { ConnectionRow, UserRow } from '@privid/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
+import { syncConnectionToStream } from '../services/stream';
 
 export const connectionsRouter = Router();
 
@@ -86,6 +87,9 @@ connectionsRouter.post('/', requireAuth, async (req: Request, res: Response, nex
       ]
     );
 
+    // Mirror the relationship into chat: block bans, any other type unbans.
+    syncConnectionToStream(req.user!.sub, body.contact_id, body.connection_type).catch(() => {});
+
     res.status(201).json({ ok: true, data: conn });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
@@ -120,6 +124,9 @@ connectionsRouter.patch('/:id/permission', requireAuth, async (req: Request, res
        RETURNING *`,
       [body.connection_type, body.temporary_expires_at ?? null, body.daily_call_limit ?? null, req.params.id]
     );
+
+    // Mirror the relationship into chat: block bans, any other type unbans.
+    syncConnectionToStream(existing.owner_id, existing.contact_id, body.connection_type).catch(() => {});
 
     res.json({ ok: true, data: updated });
   } catch (err) {

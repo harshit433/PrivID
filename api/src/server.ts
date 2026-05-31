@@ -9,12 +9,14 @@ import { usersRouter } from './routes/users';
 import { connectionsRouter } from './routes/connections';
 import { callsRouter } from './routes/calls';
 import { channelsRouter } from './routes/channels';
+import { chatRouter } from './routes/chat';
 import { trustRouter } from './routes/trust';
 import { simulationRouter } from './routes/simulation';
 import { errorHandler } from './middleware/errorHandler';
 import { apiLimiter, publicLimiter } from './middleware/rateLimit';
 import { getPool } from '@privid/shared';
 import { isThreediviConfigured } from './services/threedivi';
+import { isStreamConfigured } from './services/stream';
 
 const app = express();
 const PORT = parseInt(process.env.API_PORT ?? '3000', 10);
@@ -23,7 +25,11 @@ const JSON_LIMIT = process.env.EXPRESS_JSON_LIMIT ?? '15mb';
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(helmet());
 app.use(cors({ origin: true, credentials: true }));
-app.use(express.json({ limit: JSON_LIMIT }));
+// Capture the raw body so the Stream chat webhook can verify its HMAC signature.
+app.use(express.json({
+  limit: JSON_LIMIT,
+  verify: (req, _res, buf) => { (req as any).rawBody = buf; },
+}));
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 // ─── Health ───────────────────────────────────────────────────────────────────
@@ -36,6 +42,7 @@ app.get('/health', async (_req, res) => {
       ts: new Date().toISOString(),
       threedivi_configured: isThreediviConfigured(),
       threedivi_runner: process.env.THREEDIVI_RUNNER ?? 'auto',
+      stream_chat_configured: isStreamConfigured(),
     });
   } catch (err) {
     res.status(503).json({ ok: false, error: 'DB unavailable' });
@@ -95,6 +102,12 @@ app.use('/users', apiLimiter, usersRouter);
 app.use('/connections', apiLimiter, connectionsRouter);
 app.use('/calls', apiLimiter, callsRouter);
 app.use('/channels', apiLimiter, channelsRouter);
+// Stream calls /chat/webhook server-to-server (no user) — exempt it from the
+// per-user limiter; all other /chat routes are authenticated + rate limited.
+app.use('/chat', (req, res, next) => {
+  if (req.path === '/webhook') return next();
+  return apiLimiter(req, res, next);
+}, chatRouter);
 app.use('/trust', apiLimiter, trustRouter);
 app.use('/simulation', simulationRouter);
 

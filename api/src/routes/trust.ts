@@ -6,6 +6,8 @@ import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 import { recomputeAndPersist, computeTrustScore } from '../services/trustScore';
 import { isLivenessConfigured, checkLiveness, livenessThreshold } from '../services/liveness';
+import { verifyAndroidIntegrityToken } from '../services/playIntegrity';
+import { logger } from '../utils/logger';
 
 export const trustRouter = Router();
 
@@ -163,7 +165,7 @@ trustRouter.post('/verify/device', requireAuth, async (req: Request, res: Respon
       if (existing) {
         // Hardware ID tied to another account — silently log, don't block
         // (legitimate when someone factory-resets and makes a new account)
-        console.warn(`[trust] hardware_id ${body.hardware_id} was previously bound to user ${existing.user_id}`);
+        logger.warn('trust', `hardware_id ${body.hardware_id} was previously bound to user ${existing.user_id}`);
       }
 
       // If this user already has a registration with a DIFFERENT fingerprint, it
@@ -175,7 +177,7 @@ trustRouter.post('/verify/device', requireAuth, async (req: Request, res: Respon
         [req.user!.sub, body.hardware_id]
       );
       if (ownReg && ownReg.device_fingerprint && ownReg.device_fingerprint !== body.device_fingerprint) {
-        console.warn(`[trust] SIM fingerprint changed for user ${req.user!.sub} — possible SIM swap`);
+        logger.warn('trust', `SIM fingerprint changed for user ${req.user!.sub} — possible SIM swap`);
         // In production you'd set a flag and require re-verification
       }
     }
@@ -226,11 +228,16 @@ trustRouter.post('/verify/device', requireAuth, async (req: Request, res: Respon
   }
 });
 
-// Stub — real impl calls Google/Apple APIs
-// Production: POST https://playintegrity.googleapis.com/v1/{package}:decodeIntegrityToken
-// with Bearer token from service account having roles/playintegrity.serviceAgent
-async function verifyDeviceIntegrityToken(_platform: string, _token: string): Promise<boolean> {
-  return true;
+// Validates Play Integrity (Android) or DeviceCheck (iOS) token server-side.
+async function verifyDeviceIntegrityToken(platform: string, token: string): Promise<boolean> {
+  if (platform === 'ios') {
+    // DeviceCheck not wired yet — same as before.
+    return true;
+  }
+  if (platform === 'android') {
+    return verifyAndroidIntegrityToken(token);
+  }
+  return false;
 }
 
 // ─── POST /trust/verify/liveness/initiate ─────────────────────────────────────
@@ -305,12 +312,18 @@ trustRouter.post('/verify/liveness/complete', requireAuth, async (req: Request, 
       if (buf.length < 1024) throw new AppError(400, 'IMAGE_INVALID', 'The captured selfie was empty. Please try again.');
 
       const result = await checkLiveness(buf).catch((err: Error) => {
-        throw new AppError(502, 'LIVENESS_CHECK_FAILED', err.message);
+        logger.error('liveness', 'Luxand check failed:', err.message);
+        throw new AppError(
+          502,
+          'LIVENESS_CHECK_FAILED',
+          'Liveness verification is temporarily unavailable. Please try again.',
+        );
       });
       score = result.score;
       passed = result.real;
-      console.log(
-        `[liveness] complete ref=${provider_ref} score=${score} threshold=${livenessThreshold()} passed=${passed}`,
+      logger.debug(
+        'liveness',
+        `complete ref=${provider_ref} score=${score} threshold=${livenessThreshold()} passed=${passed}`,
       );
     } else {
       // Dev bypass — no provider token configured.

@@ -7,6 +7,7 @@ import { AppError } from '../middleware/errorHandler';
 // callLimiter intentionally not imported — trusted contacts bypass all rate limits
 import { trackEvent } from '../services/behavior';
 import { sendIncomingCallPush, rtdbCreateCall, rtdbUpdateStatus } from '../services/fcm';
+import { logger } from '../utils/logger';
 import crypto from 'crypto';
 import { AccessToken } from 'livekit-server-sdk';
 
@@ -235,7 +236,7 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
         ]);
 
         if (!callee?.fcm_token) {
-          console.warn(`[calls] No FCM token for callee ${calleeId} — push skipped`);
+          logger.warn('calls', `No FCM token for callee ${calleeId} — push skipped`);
           return;
         }
         if (!caller) return;
@@ -250,9 +251,9 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
           trustScore:     caller.trust_score,
           connectionType: conn?.connection_type,
         });
-        console.log(`[calls] FCM push sent to ${calleeId} for call ${call.call_id}`);
+        logger.debug('calls', `FCM push sent to ${calleeId} for call ${call.call_id}`);
       } catch (err: any) {
-        console.warn('[calls] FCM push error:', err?.message);
+        logger.warn('calls', 'FCM push error:', err?.message);
       }
     })();
 

@@ -19,6 +19,8 @@ import { getPool } from '@privid/shared';
 import { isThreediviConfigured } from './services/threedivi';
 import { isStreamConfigured } from './services/stream';
 import { isLivenessConfigured } from './services/liveness';
+import { isPlayIntegrityConfigured } from './services/playIntegrity';
+import { logger } from './utils/logger';
 
 const app = express();
 const PORT = parseInt(process.env.API_PORT ?? '3000', 10);
@@ -46,14 +48,18 @@ app.get('/health', async (_req, res) => {
       threedivi_runner: process.env.THREEDIVI_RUNNER ?? 'auto',
       stream_chat_configured: isStreamConfigured(),
       liveness_configured: isLivenessConfigured(),
+      play_integrity_configured: isPlayIntegrityConfigured(),
     });
   } catch (err) {
     res.status(503).json({ ok: false, error: 'DB unavailable' });
   }
 });
 
-// ─── Debug: call system health ────────────────────────────────────────────────
+// ─── Debug: call system health (dev/staging only) ─────────────────────────────
 app.get('/debug/call-health', async (_req, res) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ ok: false, error: 'Not found' });
+  }
   const { testRtdbWrite } = await import('./services/fcm');
   const { getPool } = await import('@privid/shared');
 
@@ -115,13 +121,15 @@ app.use('/trust', apiLimiter, trustRouter);
 // The liveness web page is loaded inside a WebView (no auth header / not a
 // per-user API call), so it is public and exempt from the API rate limiter.
 app.use('/liveness', livenessRouter);
-app.use('/simulation', simulationRouter);
+if (process.env.NODE_ENV !== 'production') {
+  app.use('/simulation', simulationRouter);
+}
 
 // ─── Error handler ────────────────────────────────────────────────────────────
 app.use(errorHandler);
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[API] Running on http://0.0.0.0:${PORT}`);
+  logger.debug('API', `Running on http://0.0.0.0:${PORT}`);
 });
 
 export { app };

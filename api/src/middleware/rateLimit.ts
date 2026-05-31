@@ -50,7 +50,11 @@ export const apiLimiter = rateLimit({
   maxRequests: 60,
 });
 
-/** Strict: 5 call initiations / 10 minutes per user */
+/**
+ * Strict: 5 call initiations / 10 minutes per user.
+ * Intentionally unused — trusted contacts bypass call rate limits; unknown-caller
+ * throttling is handled inline in routes/calls.ts after connection type is resolved.
+ */
 export const callLimiter = rateLimit({
   keyFn: (req) => `call:${req.user?.sub ?? req.ip}`,
   windowSeconds: 600,

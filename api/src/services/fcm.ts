@@ -10,6 +10,7 @@
  */
 
 import admin from 'firebase-admin';
+import { logger } from '../utils/logger';
 
 // ── Singleton init ────────────────────────────────────────────────────────────
 
@@ -22,7 +23,7 @@ function getApp(): admin.app.App | null {
   const dbUrl  = process.env.FIREBASE_DATABASE_URL ?? 'https://privid-cb3bf-default-rtdb.firebaseio.com';
 
   if (!raw) {
-    console.warn('[Firebase] FIREBASE_SERVICE_ACCOUNT_JSON not set — FCM + RTDB disabled');
+    logger.warn('Firebase', 'FIREBASE_SERVICE_ACCOUNT_JSON not set — FCM + RTDB disabled');
     _initialised = true;
     return null;
   }
@@ -34,10 +35,10 @@ function getApp(): admin.app.App | null {
       databaseURL: dbUrl,
     });
     _initialised = true;
-    console.log('[Firebase] Admin SDK initialised (FCM + RTDB)');
+    logger.debug('Firebase', 'Admin SDK initialised (FCM + RTDB)');
     return admin.apps[0] ?? null;
   } catch (err: any) {
-    console.error('[Firebase] Failed to init Admin SDK:', err?.message);
+    logger.error('Firebase', 'Failed to init Admin SDK:', err?.message);
     _initialised = true;
     return null;
   }
@@ -85,7 +86,7 @@ export async function rtdbCreateCall(
       created_at: Date.now(),
     });
   } catch (err: any) {
-    console.warn('[RTDB] rtdbCreateCall failed:', err?.message);
+    logger.warn('RTDB', 'rtdbCreateCall failed:', err?.message);
   }
 }
 
@@ -111,7 +112,7 @@ export async function rtdbUpdateStatus(
       }, 60_000);
     }
   } catch (err: any) {
-    console.warn('[RTDB] rtdbUpdateStatus failed:', err?.message);
+    logger.warn('RTDB', 'rtdbUpdateStatus failed:', err?.message);
   }
 }
 
@@ -157,8 +158,8 @@ export async function sendIncomingCallPush(
         ttl:      30_000,
       },
     });
-    console.log(`[FCM] Wakeup push sent → call ${payload.callId}`);
+    logger.debug('FCM', `Wakeup push sent → call ${payload.callId}`);
   } catch (err: any) {
-    console.warn(`[FCM] Push failed: ${err?.message}`);
+    logger.warn('FCM', `Push failed: ${err?.message}`);
   }
 }

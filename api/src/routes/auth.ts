@@ -120,9 +120,6 @@ authRouter.post('/register/initiate', async (req: Request, res: Response, next: 
     );
 
     // In production: send OTP via SMS provider
-    if (process.env.NODE_ENV !== 'production') {
-      console.log(`[DEV] OTP for ${phone_e164}: ${otp}`);
-    }
 
     res.json({
       ok: true,
@@ -245,8 +242,6 @@ authRouter.post('/login/initiate', async (req: Request, res: Response, next: Nex
       `INSERT INTO otp_sessions (phone_e164, otp_hash, expires_at) VALUES ($1, $2, $3) RETURNING session_id`,
       [phone_e164, otp_hash, expires_at]
     );
-
-    if (process.env.NODE_ENV !== 'production') console.log(`[DEV] Login OTP for ${phone_e164}: ${otp}`);
 
     res.json({
       ok: true,

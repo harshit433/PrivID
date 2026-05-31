@@ -5,7 +5,13 @@ import { query, queryOne, withTransaction, getRedis } from '@privid/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 import { recomputeAndPersist, computeTrustScore } from '../services/trustScore';
-import { isThreediviConfigured, verifyLivenessFromImages } from '../services/threedivi';
+import {
+  isLivenessConfigured,
+  createLivenessSession,
+  getLivenessResults,
+  livenessRegion,
+  livenessThreshold,
+} from '../services/rekognition';
 
 export const trustRouter = Router();
 
@@ -234,36 +240,42 @@ async function verifyDeviceIntegrityToken(_platform: string, _token: string): Pr
 }
 
 // ─── POST /trust/verify/liveness/initiate ─────────────────────────────────────
-// Starts a 3DiVi liveness session (client captures face photos next).
+// Creates an Amazon Rekognition Face Liveness session. The client renders the
+// FaceLivenessDetector (in a WebView) with the returned SessionId, which streams
+// the selfie video to Rekognition. We verify the outcome in /complete.
 
 trustRouter.post('/verify/liveness/initiate', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const sessionId = crypto.randomUUID();
+    const configured = isLivenessConfigured();
+
+    // When configured, the provider_ref IS the Rekognition SessionId.
+    // In dev (no AWS creds / identity pool) we fall back to a random UUID and
+    // auto-pass on /complete so local development works without an AWS account.
+    const providerRef = configured ? await createLivenessSession() : crypto.randomUUID();
 
     await query(
       `INSERT INTO trust_factors (user_id, factor_type, status, provider, provider_ref, score_delta, metadata)
-       VALUES ($1, 'liveness_check', 'pending', '3divi', $2, 25, $3)
+       VALUES ($1, 'liveness_check', 'pending', 'rekognition', $2, 25, $3)
        ON CONFLICT (user_id, factor_type) WHERE is_latest = TRUE
        DO UPDATE SET
          provider_ref = EXCLUDED.provider_ref,
          status = 'pending',
-         provider = '3divi',
+         provider = 'rekognition',
          metadata = EXCLUDED.metadata,
          verified_at = NULL`,
       [
         req.user!.sub,
-        sessionId,
-        JSON.stringify({ threedivi_configured: isThreediviConfigured() }),
+        providerRef,
+        JSON.stringify({ liveness_configured: configured }),
       ]
     );
 
     res.json({
       ok: true,
       data: {
-        provider_ref: sessionId,
-        threedivi_enabled: isThreediviConfigured(),
-        min_captures: 1,
-        max_captures: 3,
+        provider_ref: providerRef,
+        liveness_enabled: configured,
+        region: livenessRegion(),
       },
     });
   } catch (err) {
@@ -272,20 +284,19 @@ trustRouter.post('/verify/liveness/initiate', requireAuth, async (req: Request, 
 });
 
 // ─── POST /trust/verify/liveness/complete ─────────────────────────────────────
-// Verifies JPEG captures with 3DiVi LIVENESS_ESTIMATOR.
+// Fetches the Rekognition Face Liveness result for the session and enforces the
+// confidence threshold. On failure the factor is marked 'failed' and the client
+// must not be allowed to proceed.
 
 trustRouter.post('/verify/liveness/complete', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { provider_ref, captures } = z
+    const { provider_ref } = z
       .object({
-        provider_ref: z.string().uuid(),
-        captures: z.array(z.string().min(100)).max(3).default([]),
+        provider_ref: z.string().min(8),
+        // Accepted for backwards-compatibility with older clients; ignored.
+        captures: z.array(z.string()).optional(),
       })
       .parse(req.body);
-
-    if (isThreediviConfigured() && captures.length === 0) {
-      throw new AppError(400, 'VALIDATION_ERROR', 'At least one face capture is required.');
-    }
 
     const factor = await queryOne<{ factor_id: string; status: string }>(
       `SELECT factor_id, status FROM trust_factors
@@ -298,31 +309,34 @@ trustRouter.post('/verify/liveness/complete', requireAuth, async (req: Request, 
       return res.json({ ok: true, data: { score: breakdown.total, tier: breakdown.tier, already_verified: true } });
     }
 
-    const images = captures.map((b64) => {
-      const raw = b64.replace(/^data:image\/\w+;base64,/, '');
-      return Buffer.from(raw, 'base64');
-    });
+    const configured = isLivenessConfigured();
+    let passed: boolean;
+    let confidence: number;
+    let status: string;
 
-    const result = await verifyLivenessFromImages(images).catch((err: Error & { code?: string }) => {
-      throw new AppError(502, err.code ?? 'THREEDIVI_CHECK_FAILED', err.message);
-    });
+    if (configured) {
+      const result = await getLivenessResults(provider_ref).catch((err: Error) => {
+        throw new AppError(502, 'LIVENESS_CHECK_FAILED', err.message);
+      });
+      status = result.status;
+      confidence = result.confidence;
+      passed = result.status === 'SUCCEEDED' && result.confidence >= livenessThreshold();
+    } else {
+      // Dev bypass — no AWS configured.
+      status = 'SUCCEEDED';
+      confidence = 100;
+      passed = true;
+    }
 
-    if (!result.passed) {
+    if (!passed) {
       await query(
         `UPDATE trust_factors SET status = 'failed', metadata = metadata || $2::jsonb WHERE factor_id = $1`,
-        [
-          factor.factor_id,
-          JSON.stringify({
-            verdict: result.verdict,
-            confidence: result.confidence,
-            faces_detected: result.facesDetected,
-          }),
-        ]
+        [factor.factor_id, JSON.stringify({ status, confidence })]
       );
       const hint =
-        result.facesDetected === 0
-          ? 'No face detected. Center your face in the frame and try again.'
-          : 'Liveness check did not pass. Use good lighting and avoid photos or screens.';
+        status === 'EXPIRED'
+          ? 'The liveness session expired. Please try again.'
+          : 'Liveness check did not pass. Use good lighting, hold steady, and make sure it is a live person.';
       throw new AppError(400, 'LIVENESS_FAILED', hint);
     }
 
@@ -330,14 +344,7 @@ trustRouter.post('/verify/liveness/complete', requireAuth, async (req: Request, 
       `UPDATE trust_factors
        SET status = 'completed', verified_at = NOW(), metadata = metadata || $2::jsonb
        WHERE factor_id = $1`,
-      [
-        factor.factor_id,
-        JSON.stringify({
-          verdict: result.verdict,
-          confidence: result.confidence,
-          capture_count: images.length,
-        }),
-      ]
+      [factor.factor_id, JSON.stringify({ status, confidence })]
     );
 
     const breakdown = await recomputeAndPersist(req.user!.sub);
@@ -346,7 +353,7 @@ trustRouter.post('/verify/liveness/complete', requireAuth, async (req: Request, 
       data: {
         score: breakdown.total,
         tier: breakdown.tier,
-        liveness: { verdict: result.verdict, confidence: result.confidence },
+        liveness: { status, confidence },
       },
     });
   } catch (err) {

@@ -11,12 +11,14 @@ import { callsRouter } from './routes/calls';
 import { channelsRouter } from './routes/channels';
 import { chatRouter } from './routes/chat';
 import { trustRouter } from './routes/trust';
+import { livenessRouter } from './routes/liveness';
 import { simulationRouter } from './routes/simulation';
 import { errorHandler } from './middleware/errorHandler';
 import { apiLimiter, publicLimiter } from './middleware/rateLimit';
 import { getPool } from '@privid/shared';
 import { isThreediviConfigured } from './services/threedivi';
 import { isStreamConfigured } from './services/stream';
+import { isLivenessConfigured } from './services/rekognition';
 
 const app = express();
 const PORT = parseInt(process.env.API_PORT ?? '3000', 10);
@@ -43,6 +45,7 @@ app.get('/health', async (_req, res) => {
       threedivi_configured: isThreediviConfigured(),
       threedivi_runner: process.env.THREEDIVI_RUNNER ?? 'auto',
       stream_chat_configured: isStreamConfigured(),
+      rekognition_liveness_configured: isLivenessConfigured(),
     });
   } catch (err) {
     res.status(503).json({ ok: false, error: 'DB unavailable' });
@@ -109,6 +112,9 @@ app.use('/chat', (req, res, next) => {
   return apiLimiter(req, res, next);
 }, chatRouter);
 app.use('/trust', apiLimiter, trustRouter);
+// The liveness web page is loaded inside a WebView (no auth header / not a
+// per-user API call), so it is public and exempt from the API rate limiter.
+app.use('/liveness', livenessRouter);
 app.use('/simulation', simulationRouter);
 
 // ─── Error handler ────────────────────────────────────────────────────────────

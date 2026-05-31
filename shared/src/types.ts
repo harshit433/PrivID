@@ -27,6 +27,10 @@ export interface UserRow {
   avatar_url: string | null;
   trust_tier: TrustTier;
   trust_score: number;
+  email: string | null;
+  profession: string | null;
+  bio: string | null;
+  business_info: string | null;
   is_active: boolean;
   onboarding_complete: boolean;
   discovery_mode: 'public' | 'private';

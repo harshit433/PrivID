@@ -14,7 +14,9 @@ export const usersRouter = Router();
 usersRouter.get('/me', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const user = await queryOne<UserRow>(
-      `SELECT user_id, handle, display_name, avatar_url, trust_tier, trust_score, onboarding_complete, discovery_mode, created_at
+      `SELECT user_id, handle, display_name, avatar_url, trust_tier, trust_score,
+              phone_e164, email, profession, bio, business_info,
+              onboarding_complete, discovery_mode, created_at
        FROM users WHERE user_id = $1`,
       [req.user!.sub]
     );
@@ -40,29 +42,59 @@ usersRouter.get('/me', requireAuth, async (req: Request, res: Response, next: Ne
 
 // ─── PATCH /users/me ──────────────────────────────────────────────────────────
 
+// Empty strings collapse to NULL so a user can clear an optional field.
+const optionalText = (max: number) =>
+  z
+    .string()
+    .max(max)
+    .nullable()
+    .optional()
+    .transform((v) => (v == null ? v : v.trim() === '' ? null : v.trim()));
+
 const updateSchema = z.object({
   display_name: z.string().min(1).max(60).optional(),
   avatar_url: z.string().url().optional(),
   discovery_mode: z.enum(['public', 'private']).optional(),
+  email: optionalText(120),
+  profession: optionalText(60),
+  bio: optionalText(500),
+  business_info: optionalText(1000),
 });
 
 usersRouter.patch('/me', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { display_name, avatar_url, discovery_mode } = updateSchema.parse(req.body);
+    const body = updateSchema.parse(req.body);
+
+    // Validate email format only when a non-empty value is supplied.
+    if (body.email != null && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email)) {
+      throw new AppError(400, 'VALIDATION_ERROR', 'Please enter a valid email address.');
+    }
 
     const updates: string[] = [];
     const params: any[] = [];
     let i = 1;
 
-    if (display_name !== undefined) { updates.push(`display_name = $${i++}`); params.push(display_name); }
-    if (avatar_url !== undefined) { updates.push(`avatar_url = $${i++}`); params.push(avatar_url); }
-    if (discovery_mode !== undefined) { updates.push(`discovery_mode = $${i++}`); params.push(discovery_mode); }
+    const setField = (col: string, val: unknown) => {
+      updates.push(`${col} = $${i++}`);
+      params.push(val);
+    };
+
+    if (body.display_name !== undefined) setField('display_name', body.display_name);
+    if (body.avatar_url !== undefined) setField('avatar_url', body.avatar_url);
+    if (body.discovery_mode !== undefined) setField('discovery_mode', body.discovery_mode);
+    if (body.email !== undefined) setField('email', body.email);
+    if (body.profession !== undefined) setField('profession', body.profession);
+    if (body.bio !== undefined) setField('bio', body.bio);
+    if (body.business_info !== undefined) setField('business_info', body.business_info);
 
     if (updates.length === 0) throw new AppError(400, 'NO_CHANGES', 'Nothing to update.');
+    updates.push('updated_at = NOW()');
 
     params.push(req.user!.sub);
     const [user] = await query<UserRow>(
-      `UPDATE users SET ${updates.join(', ')} WHERE user_id = $${i} RETURNING user_id, handle, display_name, avatar_url, trust_tier, trust_score, discovery_mode`,
+      `UPDATE users SET ${updates.join(', ')} WHERE user_id = $${i}
+       RETURNING user_id, handle, display_name, avatar_url, trust_tier, trust_score,
+                 phone_e164, email, profession, bio, business_info, discovery_mode`,
       params
     );
 

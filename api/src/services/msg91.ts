@@ -1,6 +1,8 @@
 import axios from 'axios';
+import { logger } from '../utils/logger';
 
 const VERIFY_URL = 'https://control.msg91.com/api/v5/widget/verifyAccessToken';
+const FLOW_URL = 'https://control.msg91.com/api/v5/flow/';
 
 function isJwtLike(token: string): boolean {
   const parts = token.trim().split('.');
@@ -98,4 +100,82 @@ function extractIdentifier(data: Record<string, unknown>): string | null {
     }
   }
   return null;
+}
+
+/** Build SMS body for Android SMS Retriever (must end with 11-char app hash). */
+export function buildSimVerificationSmsBody(code: string, appHash: string): string {
+  return `<#> PrivID SIM: ${code}\n${appHash}`;
+}
+
+/**
+ * Send SIM binding challenge SMS via MSG91.
+ * Uses MSG91_SIM_SMS_TEMPLATE_ID when set; otherwise sends a raw transactional SMS.
+ */
+export async function sendSimVerificationSms(
+  phoneE164: string,
+  code: string,
+  appHash: string,
+): Promise<void> {
+  const authkey = process.env.MSG91_AUTH_KEY;
+  const message = buildSimVerificationSmsBody(code, appHash);
+  const mobile = phoneE164.replace(/\s/g, '').replace(/^\+/, '');
+
+  if (!authkey) {
+    if (process.env.NODE_ENV !== 'production') {
+      logger.info('msg91', `[dev] SIM SMS to ${phoneE164}: ${message}`);
+      return;
+    }
+    throw Object.assign(new Error('MSG91_AUTH_KEY is not configured on the server'), {
+      code: 'MSG91_NOT_CONFIGURED',
+    });
+  }
+
+  const templateId = process.env.MSG91_SIM_SMS_TEMPLATE_ID ?? process.env.MSG91_TEMPLATE_ID;
+  const sender = process.env.MSG91_SMS_SENDER ?? 'PRIVID';
+
+  try {
+    if (templateId) {
+      await axios.post(
+        FLOW_URL,
+        {
+          template_id: templateId,
+          short_url: '0',
+          recipients: [
+            {
+              mobiles: mobile,
+              code,
+              hash: appHash,
+              var: code,
+              VAR1: code,
+              VAR2: appHash,
+            },
+          ],
+        },
+        {
+          headers: { authkey, 'Content-Type': 'application/json' },
+          timeout: 15_000,
+        },
+      );
+      return;
+    }
+
+    await axios.post(
+      'https://control.msg91.com/api/v5/sms/',
+      {
+        sender,
+        route: '4',
+        country: '91',
+        sms: [{ message, to: [mobile] }],
+      },
+      {
+        headers: { authkey, 'Content-Type': 'application/json' },
+        timeout: 15_000,
+      },
+    );
+  } catch (err: unknown) {
+    const ax = err as { response?: { data?: { message?: string } }; message?: string };
+    const msg = ax.response?.data?.message ?? ax.message ?? 'Failed to send SIM verification SMS';
+    logger.error('msg91', 'SIM SMS send failed', msg);
+    throw Object.assign(new Error(msg), { code: 'SIM_SMS_SEND_FAILED' });
+  }
 }

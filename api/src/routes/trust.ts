@@ -1,13 +1,14 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { z } from 'zod';
-import { query, queryOne, withTransaction, getRedis } from '@privid/shared';
+import { query, queryOne, withTransaction, getRedis, keys } from '@privid/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 import { recomputeAndPersist, computeTrustScore } from '../services/trustScore';
 import { isLivenessConfigured, checkLiveness, livenessThreshold } from '../services/liveness';
 import { verifyAndroidIntegrityToken } from '../services/playIntegrity';
 import { logger } from '../utils/logger';
+import { sendSimVerificationSms } from '../services/msg91';
 import { phonesMatch } from '../utils/phoneMatch';
 
 export const trustRouter = Router();
@@ -211,8 +212,145 @@ trustRouter.get('/verify/device/network', requireAuth, async (req: Request, res:
   }
 });
 
+const SIM_SMS_TTL_SEC = 120;
+
+function generateSimSmsCode(length = 6): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < length; i += 1) {
+    code += chars[crypto.randomInt(0, chars.length)];
+  }
+  return code;
+}
+
+function hashSimSmsCode(userId: string, code: string): string {
+  return crypto.createHash('sha256').update(`${userId}:${code}`).digest('hex');
+}
+
+// ─── POST /trust/verify/device/sim-sms/initiate ───────────────────────────────
+// Step 4a — Send SMS to the verified phone; device auto-reads it to prove SIM presence.
+
+const simSmsInitiateSchema = z.object({
+  app_hash: z.string().min(8).max(16),
+  hardware_id: z.string().min(1),
+  device_fingerprint: z.string().optional(),
+});
+
+trustRouter.post('/verify/device/sim-sms/initiate', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = simSmsInitiateSchema.parse(req.body);
+    const userId = req.user!.sub;
+    const redis = getRedis();
+
+    const user = await queryOne<{ phone_e164: string }>(
+      `SELECT phone_e164 FROM users WHERE user_id = $1`,
+      [userId],
+    );
+    if (!user?.phone_e164) {
+      throw new AppError(400, 'PHONE_NOT_FOUND', 'Verified phone number not found on your account.');
+    }
+
+    const rateLimitKey = keys.rateLimitSimSms(user.phone_e164);
+    const attempts = await redis.incr(rateLimitKey);
+    if (attempts === 1) await redis.expire(rateLimitKey, 600);
+    if (attempts > 3) {
+      throw new AppError(429, 'RATE_LIMITED', 'Too many SIM verification SMS requests. Try again in 10 minutes.');
+    }
+
+    const code = generateSimSmsCode();
+    const challengeId = crypto.randomUUID();
+    const codeHash = hashSimSmsCode(userId, code);
+
+    await redis.set(
+      keys.simSmsChallenge(userId),
+      JSON.stringify({
+        challenge_id: challengeId,
+        code_hash: codeHash,
+        hardware_id: body.hardware_id,
+        device_fingerprint: body.device_fingerprint ?? null,
+        phone_e164: user.phone_e164,
+      }),
+      'EX',
+      SIM_SMS_TTL_SEC,
+    );
+
+    await sendSimVerificationSms(user.phone_e164, code, body.app_hash);
+
+    res.json({
+      ok: true,
+      data: {
+        challenge_id: challengeId,
+        expires_in: SIM_SMS_TTL_SEC,
+        ...(process.env.NODE_ENV !== 'production' && { _dev_code: code }),
+      },
+    });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
+// ─── POST /trust/verify/device/sim-sms/complete ───────────────────────────────
+// Step 4b — Device read the SMS; verify code and complete SIM binding.
+
+const simSmsCompleteSchema = z.object({
+  challenge_id: z.string().uuid(),
+  code: z.string().regex(/^[A-Z0-9]{6}$/),
+  hardware_id: z.string().min(1),
+  device_fingerprint: z.string().optional(),
+  platform: z.enum(['android', 'ios']).default('android'),
+});
+
+trustRouter.post('/verify/device/sim-sms/complete', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = simSmsCompleteSchema.parse(req.body);
+    const userId = req.user!.sub;
+    const redis = getRedis();
+
+    const raw = await redis.get(keys.simSmsChallenge(userId));
+    if (!raw) {
+      throw new AppError(410, 'SIM_SMS_EXPIRED', 'SIM verification SMS expired. Tap Retry to send a new one.');
+    }
+
+    const stored = JSON.parse(raw) as {
+      challenge_id: string;
+      code_hash: string;
+      hardware_id: string;
+      device_fingerprint: string | null;
+    };
+
+    if (stored.challenge_id !== body.challenge_id) {
+      throw new AppError(400, 'SIM_SMS_INVALID', 'SIM verification session mismatch. Tap Retry.');
+    }
+
+    if (stored.hardware_id !== body.hardware_id) {
+      throw new AppError(400, 'SIM_SMS_INVALID', 'Device mismatch during SIM verification.');
+    }
+
+    const incomingHash = hashSimSmsCode(userId, body.code.toUpperCase());
+    const expected = Buffer.from(stored.code_hash, 'hex');
+    const actual = Buffer.from(incomingHash, 'hex');
+    if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
+      throw new AppError(401, 'SIM_SMS_CODE_INVALID', 'Incorrect SIM verification code.');
+    }
+
+    await redis.del(keys.simSmsChallenge(userId));
+
+    const result = await completeDeviceRegistration(userId, {
+      platform: body.platform,
+      hardware_id: body.hardware_id,
+      device_fingerprint: body.device_fingerprint ?? stored.device_fingerprint ?? undefined,
+    });
+
+    res.json({ ok: true, data: { ...result, sim_bound: true } });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
 // ─── POST /trust/verify/device/sim-bind ───────────────────────────────────────
-// Step 4 — SIM phone must match the OTP-verified number on the account.
+// Legacy — SIM phone read from TelephonyManager. Prefer sim-sms flow on mobile.
 
 const simBindSchema = z.object({
   platform: z.enum(['android', 'ios']).default('android'),

@@ -29,4 +29,7 @@ exports.keys = {
     userSession: (userId) => `user:session:${userId}`,
     /** Pending MSG91 signup after OTP verified (handle not chosen yet). TTL ~15 min. */
     msg91SignupPending: (signupToken) => `msg91:signup:${signupToken}`,
+    /** SIM SMS binding challenge for authenticated user. TTL 2 min. */
+    simSmsChallenge: (userId) => `sim_sms:${userId}`,
+    rateLimitSimSms: (phone) => `ratelimit:sim_sms:${phone}`,
 };

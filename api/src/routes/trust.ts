@@ -8,7 +8,7 @@ import { recomputeAndPersist, computeTrustScore } from '../services/trustScore';
 import { isLivenessConfigured, checkLiveness, livenessThreshold } from '../services/liveness';
 import { verifyAndroidIntegrityToken } from '../services/playIntegrity';
 import { logger } from '../utils/logger';
-import { sendSimVerificationSms } from '../services/msg91';
+import { verifyMsg91AccessToken } from '../services/msg91';
 import { phonesMatch } from '../utils/phoneMatch';
 
 export const trustRouter = Router();
@@ -214,23 +214,10 @@ trustRouter.get('/verify/device/network', requireAuth, async (req: Request, res:
 
 const SIM_SMS_TTL_SEC = 120;
 
-function generateSimSmsCode(length = 6): string {
-  let code = '';
-  for (let i = 0; i < length; i += 1) {
-    code += String(crypto.randomInt(0, 10));
-  }
-  return code;
-}
-
-function hashSimSmsCode(userId: string, code: string): string {
-  return crypto.createHash('sha256').update(`${userId}:${code}`).digest('hex');
-}
-
 // ─── POST /trust/verify/device/sim-sms/initiate ───────────────────────────────
-// Step 4a — Send SMS to the verified phone; device auto-reads it to prove SIM presence.
+// Step 4a — Open SIM binding session. SMS is sent by the MSG91 widget on the device.
 
 const simSmsInitiateSchema = z.object({
-  app_hash: z.string().min(8).max(16),
   hardware_id: z.string().min(1),
   device_fingerprint: z.string().optional(),
 });
@@ -258,16 +245,11 @@ trustRouter.post('/verify/device/sim-sms/initiate', requireAuth, async (req: Req
       throw new AppError(
         429,
         'RATE_LIMITED',
-        `Too many SIM verification SMS sent. Try again in about ${waitMin} minute${waitMin === 1 ? '' : 's'}.`,
+        `Too many SIM verification attempts. Try again in about ${waitMin} minute${waitMin === 1 ? '' : 's'}.`,
       );
     }
 
-    const code = generateSimSmsCode();
     const challengeId = crypto.randomUUID();
-    const codeHash = hashSimSmsCode(userId, code);
-
-    // Send SMS first — don't store challenge or count rate limit if delivery fails.
-    await sendSimVerificationSms(user.phone_e164, code, body.app_hash);
 
     const newAttempts = await redis.incr(rateLimitKey);
     if (newAttempts === 1) await redis.expire(rateLimitKey, 900);
@@ -276,7 +258,6 @@ trustRouter.post('/verify/device/sim-sms/initiate', requireAuth, async (req: Req
       keys.simSmsChallenge(userId),
       JSON.stringify({
         challenge_id: challengeId,
-        code_hash: codeHash,
         hardware_id: body.hardware_id,
         device_fingerprint: body.device_fingerprint ?? null,
         phone_e164: user.phone_e164,
@@ -290,31 +271,20 @@ trustRouter.post('/verify/device/sim-sms/initiate', requireAuth, async (req: Req
       data: {
         challenge_id: challengeId,
         expires_in: SIM_SMS_TTL_SEC,
-        ...(process.env.NODE_ENV !== 'production' && { _dev_code: code }),
       },
     });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
-    const coded = err as { code?: string; message?: string };
-    if (coded.code === 'MSG91_SIM_SMS_NOT_CONFIGURED') {
-      return next(new AppError(503, coded.code, coded.message ?? 'SIM SMS is not configured on the server.'));
-    }
-    if (coded.code === 'SIM_SMS_SEND_FAILED') {
-      return next(new AppError(502, coded.code, coded.message ?? 'Could not send SIM verification SMS.'));
-    }
-    if (coded.code === 'MSG91_NOT_CONFIGURED') {
-      return next(new AppError(503, coded.code, coded.message ?? 'MSG91 is not configured on the server.'));
-    }
     next(err);
   }
 });
 
 // ─── POST /trust/verify/device/sim-sms/complete ───────────────────────────────
-// Step 4b — Device read the SMS; verify code and complete SIM binding.
+// Step 4b — Device auto-read the MSG91 OTP SMS; verify token and complete SIM binding.
 
 const simSmsCompleteSchema = z.object({
   challenge_id: z.string().uuid(),
-  code: z.string().regex(/^\d{6}$/, 'Enter the 6-digit code from the SMS'),
+  msg91_access_token: z.string().min(20),
   hardware_id: z.string().min(1),
   device_fingerprint: z.string().optional(),
   platform: z.enum(['android', 'ios']).default('android'),
@@ -328,14 +298,14 @@ trustRouter.post('/verify/device/sim-sms/complete', requireAuth, async (req: Req
 
     const raw = await redis.get(keys.simSmsChallenge(userId));
     if (!raw) {
-      throw new AppError(410, 'SIM_SMS_EXPIRED', 'SIM verification SMS expired. Tap Retry to send a new one.');
+      throw new AppError(410, 'SIM_SMS_EXPIRED', 'SIM verification session expired. Tap Retry to try again.');
     }
 
     const stored = JSON.parse(raw) as {
       challenge_id: string;
-      code_hash: string;
       hardware_id: string;
       device_fingerprint: string | null;
+      phone_e164: string;
     };
 
     if (stored.challenge_id !== body.challenge_id) {
@@ -346,11 +316,13 @@ trustRouter.post('/verify/device/sim-sms/complete', requireAuth, async (req: Req
       throw new AppError(400, 'SIM_SMS_INVALID', 'Device mismatch during SIM verification.');
     }
 
-    const incomingHash = hashSimSmsCode(userId, body.code.toUpperCase());
-    const expected = Buffer.from(stored.code_hash, 'hex');
-    const actual = Buffer.from(incomingHash, 'hex');
-    if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
-      throw new AppError(401, 'SIM_SMS_CODE_INVALID', 'Incorrect SIM verification code.');
+    const verified = await verifyMsg91AccessToken(body.msg91_access_token);
+    if (!phonesMatch(verified.phone_e164, stored.phone_e164)) {
+      throw new AppError(
+        400,
+        'SIM_PHONE_MISMATCH',
+        'The OTP was not verified for the same phone number on this account.',
+      );
     }
 
     await redis.del(keys.simSmsChallenge(userId));
@@ -364,6 +336,10 @@ trustRouter.post('/verify/device/sim-sms/complete', requireAuth, async (req: Req
     res.json({ ok: true, data: { ...result, sim_bound: true } });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    const coded = err as { code?: string; message?: string };
+    if (coded.code === 'MSG91_TOKEN_INVALID') {
+      return next(new AppError(401, coded.code, coded.message ?? 'SIM verification OTP was invalid.'));
+    }
     next(err);
   }
 });

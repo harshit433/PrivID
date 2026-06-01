@@ -12,6 +12,16 @@ c.connect().then(() => c.end()).then(() => process.exit(0)).catch(() => process.
   sleep 2
 done
 
+echo "[entrypoint] Waiting for Redis..."
+until node -e "
+const Redis = require('ioredis');
+const url = process.env.REDIS_PRIVATE_URL || process.env.REDIS_URL || 'redis://localhost:6379';
+const r = new Redis(url, { maxRetriesPerRequest: 1, connectTimeout: 5000, lazyConnect: true });
+r.connect().then(() => r.ping()).then(() => { r.quit(); process.exit(0); }).catch(() => process.exit(1));
+" 2>/dev/null; do
+  sleep 2
+done
+
 echo "[entrypoint] Running migrations..."
 cd /app && npm run db:migrate
 

@@ -15,7 +15,7 @@ import { livenessRouter } from './routes/liveness';
 import { simulationRouter } from './routes/simulation';
 import { errorHandler } from './middleware/errorHandler';
 import { apiLimiter, publicLimiter } from './middleware/rateLimit';
-import { getPool } from '@privid/shared';
+import { getPool, connectRedis, getRedis } from '@privid/shared';
 import { isThreediviConfigured } from './services/threedivi';
 import { isStreamConfigured } from './services/stream';
 import { isLivenessConfigured } from './services/liveness';
@@ -40,10 +40,18 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.get('/health', async (_req, res) => {
   try {
     await getPool().query('SELECT 1');
+    let redis_ok = false;
+    try {
+      await getRedis().ping();
+      redis_ok = true;
+    } catch {
+      redis_ok = false;
+    }
     res.json({
       ok: true,
       service: 'api',
       ts: new Date().toISOString(),
+      redis_ok,
       threedivi_configured: isThreediviConfigured(),
       threedivi_runner: process.env.THREEDIVI_RUNNER ?? 'auto',
       stream_chat_configured: isStreamConfigured(),
@@ -128,8 +136,21 @@ if (process.env.NODE_ENV !== 'production') {
 // ─── Error handler ────────────────────────────────────────────────────────────
 app.use(errorHandler);
 
-app.listen(PORT, '0.0.0.0', () => {
-  logger.debug('API', `Running on http://0.0.0.0:${PORT}`);
+async function startServer(): Promise<void> {
+  try {
+    await connectRedis();
+  } catch (err) {
+    console.warn('[API] Starting without Redis — rate limits and SIM SMS may fail until Redis is up:', err);
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    logger.debug('API', `Running on http://0.0.0.0:${PORT}`);
+  });
+}
+
+startServer().catch((err) => {
+  console.error('[API] Failed to start', err);
+  process.exit(1);
 });
 
 export { app };

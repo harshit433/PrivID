@@ -2,18 +2,65 @@ import Redis from 'ioredis';
 
 let client: Redis | null = null;
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Prefer Railway private networking when available. */
+export function resolveRedisUrl(): string {
+  return process.env.REDIS_PRIVATE_URL ?? process.env.REDIS_URL ?? 'redis://localhost:6379';
+}
+
 export function getRedis(): Redis {
   if (!client) {
-    client = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379', {
+    client = new Redis(resolveRedisUrl(), {
       maxRetriesPerRequest: 3,
       lazyConnect: true,
+      connectTimeout: 10_000,
+      retryStrategy: (times) => {
+        if (times > 30) return null;
+        return Math.min(times * 200, 3_000);
+      },
+      reconnectOnError: (err) => {
+        const msg = err.message ?? '';
+        return (
+          msg.includes('READONLY') ||
+          msg.includes('ECONNREFUSED') ||
+          msg.includes('ETIMEDOUT') ||
+          msg.includes('EHOSTUNREACH')
+        );
+      },
     });
 
     client.on('error', (err) => {
-      console.error('[Redis] Connection error', err);
+      // Transient during Railway redeploys — connectRedis() handles startup.
+      console.error('[Redis] Connection error', err.message ?? err);
     });
   }
   return client;
+}
+
+/** Block until Redis accepts connections (Railway API often starts before Redis). */
+export async function connectRedis(maxAttempts = 30, delayMs = 2_000): Promise<void> {
+  const redis = getRedis();
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      if (redis.status === 'wait' || redis.status === 'end') {
+        await redis.connect();
+      }
+      await redis.ping();
+      console.log(`[Redis] Connected (${attempt === 1 ? 'immediate' : `attempt ${attempt}`})`);
+      return;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (attempt >= maxAttempts) {
+        throw new Error(`Redis unavailable after ${maxAttempts} attempts: ${message}`);
+      }
+      console.warn(`[Redis] Not ready (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms…`);
+      await sleep(delayMs);
+    }
+  }
 }
 
 // Key helpers — centralized so nothing is spelled inconsistently

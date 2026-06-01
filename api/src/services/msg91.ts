@@ -108,13 +108,30 @@ export function buildSimVerificationSmsBody(code: string, appHash: string): stri
   return `<#> PrivID SIM: ${code}\n${appHash}`;
 }
 
+type Msg91ResponseBody = {
+  type?: string;
+  status?: string;
+  message?: string;
+  request_id?: string;
+};
+
 function parseMsg91Error(err: unknown): string {
   const ax = err as {
-    response?: { data?: { message?: string; type?: string } };
+    response?: { data?: Msg91ResponseBody | string };
     message?: string;
   };
   const data = ax.response?.data;
-  return data?.message ?? ax.message ?? 'Failed to send SIM verification SMS';
+  if (typeof data === 'string' && data.trim()) return data;
+  if (data && typeof data === 'object' && data.message) return data.message;
+  return ax.message ?? 'Failed to send SIM verification SMS';
+}
+
+function assertMsg91Success(data: unknown, context: string): void {
+  if (!data || typeof data !== 'object') return;
+  const body = data as Msg91ResponseBody;
+  if (body.type === 'error' || body.status === 'error') {
+    throw new Error(body.message ?? `${context} rejected by MSG91`);
+  }
 }
 
 /** Flow / OneAPI template — must be a SMS Flow ID from MSG91 Templates (not the OTP widget template). */
@@ -144,10 +161,7 @@ async function sendSimSmsViaFlow(
     timeout: 15_000,
   });
 
-  const body = res.data as { type?: string; message?: string };
-  if (body.type === 'error') {
-    throw new Error(body.message ?? 'MSG91 Flow API rejected the SIM SMS request');
-  }
+  assertMsg91Success(res.data, 'Flow API');
 }
 
 /** OTP API — uses the same DLT OTP template as login (delivers SMS; user may enter code manually). */
@@ -160,6 +174,7 @@ async function sendSimSmsViaOtp(
   const res = await axios.post(
     OTP_URL,
     {
+      authkey,
       template_id: templateId,
       mobile,
       otp: code,
@@ -172,10 +187,11 @@ async function sendSimSmsViaOtp(
     },
   );
 
-  const body = res.data as { type?: string; message?: string };
-  if (body.type === 'error') {
-    throw new Error(body.message ?? 'MSG91 OTP API rejected the SIM SMS request');
-  }
+  assertMsg91Success(res.data, 'OTP API');
+}
+
+function codedError(message: string, code: string): Error {
+  return Object.assign(new Error(message), { code });
 }
 
 /**
@@ -195,12 +211,10 @@ export async function sendSimVerificationSms(
 
   if (!authkey) {
     if (process.env.NODE_ENV !== 'production') {
-      logger.info('msg91', `[dev] SIM SMS to ${phoneE164}: ${buildSimVerificationSmsBody(code, appHash)}`);
+      logger.debug('msg91', `[dev] SIM SMS to ${phoneE164}: ${buildSimVerificationSmsBody(code, appHash)}`);
       return;
     }
-    throw Object.assign(new Error('MSG91_AUTH_KEY is not configured on the server'), {
-      code: 'MSG91_NOT_CONFIGURED',
-    });
+    throw codedError('MSG91_AUTH_KEY is not configured on the server', 'MSG91_NOT_CONFIGURED');
   }
 
   const flowId = process.env.MSG91_SIM_SMS_FLOW_ID ?? process.env.MSG91_SIM_SMS_TEMPLATE_ID;
@@ -209,25 +223,28 @@ export async function sendSimVerificationSms(
   try {
     if (flowId) {
       await sendSimSmsViaFlow(authkey, flowId, mobile, code, appHash);
-      logger.info('msg91', `SIM SMS sent via Flow template ${flowId} to ${phoneE164}`);
+      logger.info('msg91', `SIM SMS sent via Flow ${flowId} → ${phoneE164}`);
       return;
     }
 
     if (otpTemplateId) {
       await sendSimSmsViaOtp(authkey, otpTemplateId, mobile, code);
-      logger.info('msg91', `SIM SMS sent via OTP template ${otpTemplateId} to ${phoneE164}`);
+      logger.info('msg91', `SIM SMS sent via OTP template ${otpTemplateId} → ${phoneE164}`);
       return;
     }
 
-    throw Object.assign(
-      new Error(
-        'SIM SMS is not configured. Set MSG91_OTP_TEMPLATE_ID (same as login OTP) or MSG91_SIM_SMS_FLOW_ID on Railway.'
-      ),
-      { code: 'MSG91_SIM_SMS_NOT_CONFIGURED' },
+    throw codedError(
+      'SIM SMS is not configured. Set MSG91_OTP_TEMPLATE_ID (same as login OTP) or MSG91_SIM_SMS_FLOW_ID on Railway.',
+      'MSG91_SIM_SMS_NOT_CONFIGURED',
     );
   } catch (err: unknown) {
+    const existing = err as { code?: string; message?: string };
+    if (existing.code && existing.code !== 'SIM_SMS_SEND_FAILED') {
+      throw err;
+    }
+
     const msg = parseMsg91Error(err);
-    logger.error('msg91', 'SIM SMS send failed', msg);
-    throw Object.assign(new Error(msg), { code: 'SIM_SMS_SEND_FAILED' });
+    logger.error('msg91', 'SIM SMS send failed:', msg);
+    throw codedError(msg, 'SIM_SMS_SEND_FAILED');
   }
 }

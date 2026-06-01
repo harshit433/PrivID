@@ -260,6 +260,9 @@ trustRouter.post('/verify/device/sim-sms/initiate', requireAuth, async (req: Req
     const challengeId = crypto.randomUUID();
     const codeHash = hashSimSmsCode(userId, code);
 
+    // Send SMS first — don't store challenge if delivery fails.
+    await sendSimVerificationSms(user.phone_e164, code, body.app_hash);
+
     await redis.set(
       keys.simSmsChallenge(userId),
       JSON.stringify({
@@ -273,8 +276,6 @@ trustRouter.post('/verify/device/sim-sms/initiate', requireAuth, async (req: Req
       SIM_SMS_TTL_SEC,
     );
 
-    await sendSimVerificationSms(user.phone_e164, code, body.app_hash);
-
     res.json({
       ok: true,
       data: {
@@ -285,6 +286,16 @@ trustRouter.post('/verify/device/sim-sms/initiate', requireAuth, async (req: Req
     });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    const coded = err as { code?: string; message?: string };
+    if (coded.code === 'MSG91_SIM_SMS_NOT_CONFIGURED') {
+      return next(new AppError(503, coded.code, coded.message ?? 'SIM SMS is not configured on the server.'));
+    }
+    if (coded.code === 'SIM_SMS_SEND_FAILED') {
+      return next(new AppError(502, coded.code, coded.message ?? 'Could not send SIM verification SMS.'));
+    }
+    if (coded.code === 'MSG91_NOT_CONFIGURED') {
+      return next(new AppError(503, coded.code, coded.message ?? 'MSG91 is not configured on the server.'));
+    }
     next(err);
   }
 });

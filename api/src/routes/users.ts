@@ -1,8 +1,8 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { z } from 'zod';
-import { query, queryOne, withTransaction } from '@privid/shared';
-import type { UserRow } from '@privid/shared';
+import { query, queryOne, withTransaction } from '@trustroute/shared';
+import type { UserRow } from '@trustroute/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 import { generateAvatarUploadUrl, uploadAvatarBuffer } from '../services/s3';

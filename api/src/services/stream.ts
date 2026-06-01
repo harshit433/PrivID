@@ -20,8 +20,8 @@
  */
 
 import { StreamChat } from 'stream-chat';
-import { query, queryOne } from '@privid/shared';
-import type { ConnectionType } from '@privid/shared';
+import { query, queryOne } from '@trustroute/shared';
+import type { ConnectionType } from '@trustroute/shared';
 import { AppError } from '../middleware/errorHandler';
 
 // ─── Permission constants (deliberately more relaxed than calls) ──────────────

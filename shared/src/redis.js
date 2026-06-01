@@ -12,6 +12,7 @@ let client = null;
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
+/** Prefer Railway private networking when available. */
 function resolveRedisUrl() {
     return process.env.REDIS_PRIVATE_URL ?? process.env.REDIS_URL ?? 'redis://localhost:6379';
 }
@@ -35,11 +36,13 @@ function getRedis() {
             },
         });
         client.on('error', (err) => {
+            // Transient during Railway redeploys — connectRedis() handles startup.
             console.error('[Redis] Connection error', err.message ?? err);
         });
     }
     return client;
 }
+/** Block until Redis accepts connections (Railway API often starts before Redis). */
 async function connectRedis(maxAttempts = 30, delayMs = 2_000) {
     const redis = getRedis();
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -61,6 +64,7 @@ async function connectRedis(maxAttempts = 30, delayMs = 2_000) {
         }
     }
 }
+// Key helpers — centralized so nothing is spelled inconsistently
 exports.keys = {
     otpSession: (sessionId) => `otp:session:${sessionId}`,
     refreshToken: (tokenHash) => `refresh:${tokenHash}`,
@@ -68,7 +72,10 @@ exports.keys = {
     rateLimitCall: (userId, targetId) => `ratelimit:call:${userId}:${targetId}`,
     reachabilityToken: (token) => `reach:token:${token}`,
     userSession: (userId) => `user:session:${userId}`,
+    /** Pending MSG91 signup after OTP verified (handle not chosen yet). TTL ~15 min. */
     msg91SignupPending: (signupToken) => `msg91:signup:${signupToken}`,
+    /** SIM SMS binding challenge for authenticated user. TTL 2 min. */
     simSmsChallenge: (userId) => `sim_sms:${userId}`,
+    /** SIM SMS send counter — per user, only incremented after successful delivery. TTL 15 min. */
     rateLimitSimSms: (userId) => `ratelimit:sim_sms:${userId}`,
 };

@@ -1,7 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { z } from 'zod';
-import { query, queryOne, withTransaction, getRedis, keys } from '@privid/shared';
+import { query, queryOne, withTransaction, getRedis, keys } from '@trustroute/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 import { recomputeAndPersist, computeTrustScore } from '../services/trustScore';

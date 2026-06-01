@@ -1,7 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { query, queryOne, withTransaction } from '@privid/shared';
-import type { ConnectionRow, UserRow } from '@privid/shared';
+import { query, queryOne, withTransaction } from '@trustroute/shared';
+import type { ConnectionRow, UserRow } from '@trustroute/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 import { syncConnectionToStream } from '../services/stream';

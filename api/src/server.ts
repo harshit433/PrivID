@@ -15,7 +15,7 @@ import { livenessRouter } from './routes/liveness';
 import { simulationRouter } from './routes/simulation';
 import { errorHandler } from './middleware/errorHandler';
 import { apiLimiter, publicLimiter } from './middleware/rateLimit';
-import { getPool, connectRedis, getRedis } from '@privid/shared';
+import { getPool, connectRedis, getRedis } from '@trustroute/shared';
 import { isThreediviConfigured } from './services/threedivi';
 import { isStreamConfigured } from './services/stream';
 import { isLivenessConfigured } from './services/liveness';
@@ -69,7 +69,7 @@ app.get('/debug/call-health', async (_req, res) => {
     return res.status(404).json({ ok: false, error: 'Not found' });
   }
   const { testRtdbWrite } = await import('./services/fcm');
-  const { getPool } = await import('@privid/shared');
+  const { getPool } = await import('@trustroute/shared');
 
   const firebaseConfigured = !!process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
   const rtdbUrl = process.env.FIREBASE_DATABASE_URL ?? 'https://privid-cb3bf-default-rtdb.firebaseio.com';

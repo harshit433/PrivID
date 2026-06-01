@@ -1,4 +1,4 @@
-# PrivID API + 3DiVi Face SDK (Linux)
+# TrustRoute API + 3DiVi Face SDK (Linux)
 # Mount licensed SDK at /opt/threedivi-sdk (see threedivi-sdk/README.md).
 # Apple Silicon: use arm64 Linux SDK + platform linux/arm64 (default in compose).
 # x86-64 SDK only: set DOCKER_PLATFORM=linux/amd64 in .env
@@ -35,7 +35,7 @@ COPY shared/package.json ./shared/
 COPY signaling/package.json ./signaling/
 COPY worker/package.json ./worker/
 
-RUN npm ci --workspace=@privid/api --workspace=@privid/shared --include-workspace-root
+RUN npm ci --workspace=@trustroute/api --workspace=@trustroute/shared --include-workspace-root
 
 COPY shared ./shared
 COPY api ./api

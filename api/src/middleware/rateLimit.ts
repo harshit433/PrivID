@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { getRedis } from '@privid/shared';
+import { getRedis } from '@trustroute/shared';
 import { AppError } from './errorHandler';
 
 interface RateLimitOptions {

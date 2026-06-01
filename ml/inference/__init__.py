@@ -1,4 +1,4 @@
-"""PrivID ML inference modules."""
+"""TrustRoute ML inference modules."""
 from .block_intent   import BlockIntentClassifier
 from .call_behavior  import CallBehaviorClassifier
 from .anomaly        import AnomalyDetector

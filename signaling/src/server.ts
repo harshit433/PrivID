@@ -1,5 +1,5 @@
 /**
- * PrivID Signaling Server
+ * TrustRoute Signaling Server
  *
  * Handles WebRTC negotiation between caller and callee.
  *
@@ -34,8 +34,8 @@ if (fs.existsSync(envPath)) require('dotenv').config({ path: envPath });
 import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage } from 'http';
 import jwt from 'jsonwebtoken';
-import type { AccessTokenPayload } from '@privid/shared';
-import { queryOne } from '@privid/shared';
+import type { AccessTokenPayload } from '@trustroute/shared';
+import { queryOne } from '@trustroute/shared';
 
 const PORT = parseInt(process.env.SIGNALING_PORT ?? '3001', 10);
 

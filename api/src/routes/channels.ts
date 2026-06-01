@@ -1,7 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { query, queryOne } from '@privid/shared';
-import type { ReachabilityChannelRow } from '@privid/shared';
+import { query, queryOne } from '@trustroute/shared';
+import type { ReachabilityChannelRow } from '@trustroute/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 

@@ -1,5 +1,5 @@
 """
-train_models.py — Train all PrivID trust score models.
+train_models.py — Train all TrustRoute trust score models.
 
 Usage:
     python train_models.py --data-dir ./data --model-dir ../models

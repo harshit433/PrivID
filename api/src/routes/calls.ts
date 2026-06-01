@@ -1,7 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { query, queryOne, withTransaction } from '@privid/shared';
-import type { CallRow, ConnectionRow, ReachabilityChannelRow } from '@privid/shared';
+import { query, queryOne, withTransaction } from '@trustroute/shared';
+import type { CallRow, ConnectionRow, ReachabilityChannelRow } from '@trustroute/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 // callLimiter intentionally not imported — trusted contacts bypass all rate limits
@@ -144,7 +144,7 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
         // This is the ONLY rate limit applied — trusted contacts are never throttled.
         if (connType === 'unknown') {
           try {
-            const { getRedis } = await import('@privid/shared');
+            const { getRedis } = await import('@trustroute/shared');
             const redis = getRedis();
             const rlKey = `call_unknown:${callerId}`;
             const count = await redis.incr(rlKey);

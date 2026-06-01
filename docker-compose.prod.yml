@@ -1,4 +1,4 @@
-# Production Docker Compose for PrivID backend
+# Production Docker Compose for TrustRoute backend
 # Usage:
 #   cp api/.env.production.example api/.env.production
 #   docker compose -f docker-compose.prod.yml up -d --build
@@ -13,8 +13,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
-    image: privid-api:latest
-    container_name: privid_api
+    image: trustroute-api:latest
+    container_name: trustroute_api
     restart: unless-stopped
     platform: linux/amd64
     ports:
@@ -22,7 +22,7 @@ services:
     env_file:
       - api/.env.production
     environment:
-      DATABASE_URL: postgresql://privid:${POSTGRES_PASSWORD}@postgres:5432/privid
+      DATABASE_URL: postgresql://trustroute:${POSTGRES_PASSWORD}@postgres:5432/privid
       REDIS_URL: redis://redis:6379
       JWT_PRIVATE_KEY_PATH: /app/api/keys/private.pem
       JWT_PUBLIC_KEY_PATH: /app/api/keys/public.pem
@@ -44,12 +44,12 @@ services:
 
   postgres:
     image: postgres:16-alpine
-    container_name: privid_postgres
+    container_name: trustroute_postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: privid
+      POSTGRES_USER: trustroute
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
-      POSTGRES_DB: privid
+      POSTGRES_DB: trustroute
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./db/migrations:/docker-entrypoint-initdb.d:ro
@@ -62,7 +62,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: privid_redis
+    container_name: trustroute_redis
     restart: unless-stopped
     command: redis-server --requirepass ${REDIS_PASSWORD:-changeme}
     volumes:
@@ -75,7 +75,7 @@ services:
 
   nginx:
     image: nginx:alpine
-    container_name: privid_nginx
+    container_name: trustroute_nginx
     restart: unless-stopped
     ports:
       - '80:80'

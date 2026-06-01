@@ -7,7 +7,7 @@
  *   3. Audit trail
  */
 
-import { query } from '@privid/shared';
+import { query } from '@trustroute/shared';
 
 export type BehaviorEventType =
   | 'call_initiated'

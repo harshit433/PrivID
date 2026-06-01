@@ -1,5 +1,5 @@
 /**
- * Simulation Router — PrivID Algorithm Testing
+ * Simulation Router — TrustRoute Algorithm Testing
  *
  * Protected by SIMULATION_KEY env var. For testing/investor demo only.
  * Allows seeding a 3-day scenario with 8 personas directly into the DB
@@ -14,7 +14,7 @@
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { query, queryOne } from '@privid/shared';
+import { query, queryOne } from '@trustroute/shared';
 import { AppError } from '../middleware/errorHandler';
 import crypto from 'crypto';
 

@@ -1,5 +1,5 @@
 """
-main.py — PrivID ML Inference Service
+main.py — TrustRoute ML Inference Service
 
 FastAPI microservice that loads trained models at startup and serves
 inference requests from the Node.js backend.
@@ -126,7 +126,7 @@ def _reload_models() -> int:
 async def lifespan(app: FastAPI):
     global _db_pool
 
-    log.info("PrivID ML Service starting …")
+    log.info("TrustRoute ML Service starting …")
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     trained = _reload_models()
@@ -149,9 +149,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="PrivID ML Service",
+    title="TrustRoute ML Service",
     version="1.0.0",
-    description="Trust score ML inference for PrivID",
+    description="Trust score ML inference for TrustRoute",
     lifespan=lifespan,
 )
 

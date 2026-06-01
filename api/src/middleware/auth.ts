@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import fs from 'fs';
 import path from 'path';
-import { AccessTokenPayload } from '@privid/shared';
+import { AccessTokenPayload } from '@trustroute/shared';
 import { AppError } from './errorHandler';
 
 let publicKey: string | null = null;

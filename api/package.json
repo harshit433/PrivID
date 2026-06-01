@@ -1,5 +1,5 @@
 {
-  "name": "@privid/api",
+  "name": "@trustroute/api",
   "version": "1.0.0",
   "main": "src/server.ts",
   "scripts": {
@@ -14,7 +14,7 @@
     "@aws-sdk/client-rekognition": "^3.1057.0",
     "@aws-sdk/client-s3": "^3.600.0",
     "@aws-sdk/s3-request-presigner": "^3.600.0",
-    "@privid/shared": "*",
+    "@trustroute/shared": "*",
     "axios": "^1.16.1",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",

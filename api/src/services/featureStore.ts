@@ -1,5 +1,5 @@
 /**
- * PrivID Feature Store — v1
+ * TrustRoute Feature Store — v1
  *
  * Extracts ~45 behavioral features for a user, used by:
  *   - ML trust score models (Python inference service)
@@ -9,7 +9,7 @@
  * Hot path (per-call scoring) uses a subset; full extraction is for batch scoring.
  */
 
-import { query, queryOne } from '@privid/shared';
+import { query, queryOne } from '@trustroute/shared';
 
 // ─── Feature interface ────────────────────────────────────────────────────────
 

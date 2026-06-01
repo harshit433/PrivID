@@ -1,5 +1,5 @@
 import { Worker, Job } from 'bullmq';
-import { query } from '@privid/shared';
+import { query } from '@trustroute/shared';
 import type { MassOutreachJob } from '../queues';
 import { trustRecomputeQueue } from '../queues';
 import { getBullRedis } from '../redis';

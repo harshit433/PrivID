@@ -11,7 +11,7 @@ import { startMassOutreachWorker, enqueueMassOutreachScan } from './jobs/massOut
 import { startChannelExpiryWorker, enqueueChannelExpiryScan } from './jobs/channelExpiry';
 import { startTokenRotationWorker, enqueueTokenRotation } from './jobs/tokenRotation';
 
-console.log('[worker] Starting PrivID workers...');
+console.log('[worker] Starting TrustRoute workers...');
 
 // ─── Start all workers ────────────────────────────────────────────────────────
 const workers = [

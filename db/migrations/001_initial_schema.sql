@@ -1,4 +1,4 @@
--- PrivID Database Schema v1
+-- TrustRoute Database Schema v1
 -- Run in order; each migration is idempotent via IF NOT EXISTS
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";

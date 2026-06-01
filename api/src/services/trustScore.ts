@@ -1,5 +1,5 @@
 /**
- * PrivID Trust Score Engine — v3 (Pure ML)
+ * TrustRoute Trust Score Engine — v3 (Pure ML)
  *
  * Score range: 0 – 100
  * Tier thresholds:
@@ -34,8 +34,8 @@
  *   - Score drops below 20 for the first time (behavioral degradation)
  */
 
-import { query, queryOne, withTransaction } from '@privid/shared';
-import type { TrustTier, UserRow } from '@privid/shared';
+import { query, queryOne, withTransaction } from '@trustroute/shared';
+import type { TrustTier, UserRow } from '@trustroute/shared';
 import { extractFeatures } from './featureStore';
 import { mlScoreUser, mlBatchScore } from './mlClient';
 import type { UserFeatures } from './featureStore';

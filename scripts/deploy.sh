@@ -1,5 +1,5 @@
 #!/bin/bash
-# PrivID Backend Deployment Script
+# TrustRoute Backend Deployment Script
 # Run this on your DigitalOcean droplet or any Ubuntu 22.04 server
 #
 # Usage: curl -sSL https://your-domain/deploy.sh | bash
@@ -7,7 +7,7 @@
 
 set -e
 
-echo "🚀 PrivID Backend Deployment"
+echo "🚀 TrustRoute Backend Deployment"
 echo ""
 
 # ── 1. Install Docker if not present ─────────────────────────────────────────
@@ -42,7 +42,7 @@ fi
 # ── 4. Run database migrations ────────────────────────────────────────────────
 echo "Running database migrations..."
 docker compose -f docker-compose.prod.yml run --rm api node -e "
-const { getPool } = require('@privid/shared');
+const { getPool } = require('@trustroute/shared');
 const fs = require('fs');
 const path = require('path');
 const pool = getPool();

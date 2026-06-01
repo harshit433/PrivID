@@ -6,8 +6,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
-    image: privid-api:latest
-    container_name: privid_api
+    image: trustroute-api:latest
+    container_name: trustroute_api
     restart: unless-stopped
     platform: ${DOCKER_PLATFORM:-linux/arm64}
     ports:
@@ -15,7 +15,7 @@ services:
     env_file:
       - api/.env
     environment:
-      DATABASE_URL: postgresql://privid:privid_dev@postgres:5432/privid
+      DATABASE_URL: postgresql://trustroute:trustroute_dev@postgres:5432/privid
       REDIS_URL: redis://redis:6379
       JWT_PRIVATE_KEY_PATH: /app/api/keys/private.pem
       JWT_PUBLIC_KEY_PATH: /app/api/keys/public.pem
@@ -41,12 +41,12 @@ services:
 
   postgres:
     image: postgres:16-alpine
-    container_name: privid_postgres
+    container_name: trustroute_postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: privid
-      POSTGRES_PASSWORD: privid_dev
-      POSTGRES_DB: privid
+      POSTGRES_USER: trustroute
+      POSTGRES_PASSWORD: trustroute_dev
+      POSTGRES_DB: trustroute
     ports:
       - '5432:5432'
     volumes:
@@ -59,7 +59,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: privid_redis
+    container_name: trustroute_redis
     restart: unless-stopped
     ports:
       - '6379:6379'

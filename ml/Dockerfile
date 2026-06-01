@@ -1,4 +1,4 @@
-# ── PrivID ML Service ─────────────────────────────────────────────────────────
+# ── TrustRoute ML Service ─────────────────────────────────────────────────────────
 # Deployed on Railway as a separate service pointing to backend/ml/ root dir.
 # Railway sets PORT automatically; uvicorn reads it from env.
 #

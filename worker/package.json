@@ -1,5 +1,5 @@
 {
-  "name": "@privid/worker",
+  "name": "@trustroute/worker",
   "version": "1.0.0",
   "main": "src/index.ts",
   "scripts": {
@@ -8,7 +8,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@privid/shared": "*",
+    "@trustroute/shared": "*",
     "bullmq": "^5.12.0",
     "dotenv": "^16.4.5"
   },

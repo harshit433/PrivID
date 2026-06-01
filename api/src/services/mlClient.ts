@@ -1,12 +1,12 @@
 /**
- * mlClient.ts — HTTP client for the PrivID ML inference service.
+ * mlClient.ts — HTTP client for the TrustRoute ML inference service.
  *
  * The ML service is a separate Python/FastAPI process.
  * This module provides typed wrappers for all ML endpoints.
  *
  * Environment variables:
  *   ML_SERVICE_URL   base URL of the Python service  (default: http://localhost:8001)
- *   ML_API_KEY       shared secret sent as X-API-Key  (default: privid-ml-dev-key)
+ *   ML_API_KEY       shared secret sent as X-API-Key  (default: trustroute-ml-dev-key)
  *   ML_TIMEOUT_MS    per-request timeout in ms         (default: 3000)
  *
  * Fail-open design: if the ML service is unreachable or returns an error,
@@ -19,7 +19,7 @@ import type { UserFeatures } from './featureStore';
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const ML_BASE   = process.env.ML_SERVICE_URL ?? 'http://localhost:8001';
-const ML_KEY    = process.env.ML_API_KEY     ?? 'privid-ml-dev-key';
+const ML_KEY    = process.env.ML_API_KEY     ?? 'trustroute-ml-dev-key';
 const ML_TIMEOUT = parseInt(process.env.ML_TIMEOUT_MS ?? '3000', 10);
 
 // ─── Response types ───────────────────────────────────────────────────────────

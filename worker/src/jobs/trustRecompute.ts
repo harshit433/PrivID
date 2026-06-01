@@ -1,6 +1,6 @@
 import { Worker, Job } from 'bullmq';
-import { query, withTransaction } from '@privid/shared';
-import type { TrustTier, UserRow } from '@privid/shared';
+import { query, withTransaction } from '@trustroute/shared';
+import type { TrustTier, UserRow } from '@trustroute/shared';
 import type { TrustRecomputeJob } from '../queues';
 import { getBullRedis } from '../redis';
 

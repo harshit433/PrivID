@@ -1,5 +1,5 @@
 {
-  "name": "@privid/signaling",
+  "name": "@trustroute/signaling",
   "version": "1.0.0",
   "main": "src/server.ts",
   "scripts": {
@@ -8,7 +8,7 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
-    "@privid/shared": "*",
+    "@trustroute/shared": "*",
     "ws": "^8.17.1",
     "jsonwebtoken": "^9.0.2",
     "dotenv": "^16.4.5"

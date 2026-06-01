@@ -3,6 +3,7 @@ import { logger } from '../utils/logger';
 
 const VERIFY_URL = 'https://control.msg91.com/api/v5/widget/verifyAccessToken';
 const FLOW_URL = 'https://control.msg91.com/api/v5/flow/';
+const OTP_URL = 'https://control.msg91.com/api/v5/otp';
 
 function isJwtLike(token: string): boolean {
   const parts = token.trim().split('.');
@@ -107,9 +108,82 @@ export function buildSimVerificationSmsBody(code: string, appHash: string): stri
   return `<#> PrivID SIM: ${code}\n${appHash}`;
 }
 
+function parseMsg91Error(err: unknown): string {
+  const ax = err as {
+    response?: { data?: { message?: string; type?: string } };
+    message?: string;
+  };
+  const data = ax.response?.data;
+  return data?.message ?? ax.message ?? 'Failed to send SIM verification SMS';
+}
+
+/** Flow / OneAPI template — must be a SMS Flow ID from MSG91 Templates (not the OTP widget template). */
+async function sendSimSmsViaFlow(
+  authkey: string,
+  flowId: string,
+  mobile: string,
+  code: string,
+  appHash: string,
+): Promise<void> {
+  const sender = process.env.MSG91_SMS_SENDER;
+  const codeVar = process.env.MSG91_SIM_SMS_VAR_CODE ?? 'VAR1';
+  const hashVar = process.env.MSG91_SIM_SMS_VAR_HASH ?? 'VAR2';
+
+  const recipient: Record<string, string> = { mobiles: mobile, [codeVar]: code, [hashVar]: appHash };
+
+  const payload: Record<string, unknown> = {
+    flow_id: flowId,
+    template_id: flowId,
+    short_url: '0',
+    recipients: [recipient],
+  };
+  if (sender) payload.sender = sender;
+
+  const res = await axios.post(FLOW_URL, payload, {
+    headers: { authkey, 'Content-Type': 'application/json' },
+    timeout: 15_000,
+  });
+
+  const body = res.data as { type?: string; message?: string };
+  if (body.type === 'error') {
+    throw new Error(body.message ?? 'MSG91 Flow API rejected the SIM SMS request');
+  }
+}
+
+/** OTP API — uses the same DLT OTP template as login (delivers SMS; user may enter code manually). */
+async function sendSimSmsViaOtp(
+  authkey: string,
+  templateId: string,
+  mobile: string,
+  code: string,
+): Promise<void> {
+  const res = await axios.post(
+    OTP_URL,
+    {
+      template_id: templateId,
+      mobile,
+      otp: code,
+      otp_length: 6,
+      otp_expiry: 2,
+    },
+    {
+      headers: { authkey, 'Content-Type': 'application/json' },
+      timeout: 15_000,
+    },
+  );
+
+  const body = res.data as { type?: string; message?: string };
+  if (body.type === 'error') {
+    throw new Error(body.message ?? 'MSG91 OTP API rejected the SIM SMS request');
+  }
+}
+
 /**
  * Send SIM binding challenge SMS via MSG91.
- * Uses MSG91_SIM_SMS_TEMPLATE_ID when set; otherwise sends a raw transactional SMS.
+ *
+ * Priority:
+ * 1. MSG91_SIM_SMS_FLOW_ID — Flow template with code + app-hash vars (enables Android auto-read)
+ * 2. MSG91_OTP_TEMPLATE_ID — same OTP template as login (SMS delivered; manual code entry OK)
  */
 export async function sendSimVerificationSms(
   phoneE164: string,
@@ -117,12 +191,11 @@ export async function sendSimVerificationSms(
   appHash: string,
 ): Promise<void> {
   const authkey = process.env.MSG91_AUTH_KEY;
-  const message = buildSimVerificationSmsBody(code, appHash);
   const mobile = phoneE164.replace(/\s/g, '').replace(/^\+/, '');
 
   if (!authkey) {
     if (process.env.NODE_ENV !== 'production') {
-      logger.info('msg91', `[dev] SIM SMS to ${phoneE164}: ${message}`);
+      logger.info('msg91', `[dev] SIM SMS to ${phoneE164}: ${buildSimVerificationSmsBody(code, appHash)}`);
       return;
     }
     throw Object.assign(new Error('MSG91_AUTH_KEY is not configured on the server'), {
@@ -130,51 +203,30 @@ export async function sendSimVerificationSms(
     });
   }
 
-  const templateId = process.env.MSG91_SIM_SMS_TEMPLATE_ID ?? process.env.MSG91_TEMPLATE_ID;
-  const sender = process.env.MSG91_SMS_SENDER ?? 'PRIVID';
+  const flowId = process.env.MSG91_SIM_SMS_FLOW_ID ?? process.env.MSG91_SIM_SMS_TEMPLATE_ID;
+  const otpTemplateId = process.env.MSG91_OTP_TEMPLATE_ID ?? process.env.MSG91_TEMPLATE_ID;
 
   try {
-    if (templateId) {
-      await axios.post(
-        FLOW_URL,
-        {
-          template_id: templateId,
-          short_url: '0',
-          recipients: [
-            {
-              mobiles: mobile,
-              code,
-              hash: appHash,
-              var: code,
-              VAR1: code,
-              VAR2: appHash,
-            },
-          ],
-        },
-        {
-          headers: { authkey, 'Content-Type': 'application/json' },
-          timeout: 15_000,
-        },
-      );
+    if (flowId) {
+      await sendSimSmsViaFlow(authkey, flowId, mobile, code, appHash);
+      logger.info('msg91', `SIM SMS sent via Flow template ${flowId} to ${phoneE164}`);
       return;
     }
 
-    await axios.post(
-      'https://control.msg91.com/api/v5/sms/',
-      {
-        sender,
-        route: '4',
-        country: '91',
-        sms: [{ message, to: [mobile] }],
-      },
-      {
-        headers: { authkey, 'Content-Type': 'application/json' },
-        timeout: 15_000,
-      },
+    if (otpTemplateId) {
+      await sendSimSmsViaOtp(authkey, otpTemplateId, mobile, code);
+      logger.info('msg91', `SIM SMS sent via OTP template ${otpTemplateId} to ${phoneE164}`);
+      return;
+    }
+
+    throw Object.assign(
+      new Error(
+        'SIM SMS is not configured. Set MSG91_OTP_TEMPLATE_ID (same as login OTP) or MSG91_SIM_SMS_FLOW_ID on Railway.'
+      ),
+      { code: 'MSG91_SIM_SMS_NOT_CONFIGURED' },
     );
   } catch (err: unknown) {
-    const ax = err as { response?: { data?: { message?: string } }; message?: string };
-    const msg = ax.response?.data?.message ?? ax.message ?? 'Failed to send SIM verification SMS';
+    const msg = parseMsg91Error(err);
     logger.error('msg91', 'SIM SMS send failed', msg);
     throw Object.assign(new Error(msg), { code: 'SIM_SMS_SEND_FAILED' });
   }

@@ -215,10 +215,9 @@ trustRouter.get('/verify/device/network', requireAuth, async (req: Request, res:
 const SIM_SMS_TTL_SEC = 120;
 
 function generateSimSmsCode(length = 6): string {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
   for (let i = 0; i < length; i += 1) {
-    code += chars[crypto.randomInt(0, chars.length)];
+    code += String(crypto.randomInt(0, 10));
   }
   return code;
 }
@@ -295,7 +294,7 @@ trustRouter.post('/verify/device/sim-sms/initiate', requireAuth, async (req: Req
 
 const simSmsCompleteSchema = z.object({
   challenge_id: z.string().uuid(),
-  code: z.string().regex(/^[A-Z0-9]{6}$/),
+  code: z.string().regex(/^\d{6}$/, 'Enter the 6-digit code from the SMS'),
   hardware_id: z.string().min(1),
   device_fingerprint: z.string().optional(),
   platform: z.enum(['android', 'ios']).default('android'),

@@ -70,5 +70,5 @@ exports.keys = {
     userSession: (userId) => `user:session:${userId}`,
     msg91SignupPending: (signupToken) => `msg91:signup:${signupToken}`,
     simSmsChallenge: (userId) => `sim_sms:${userId}`,
-    rateLimitSimSms: (phone) => `ratelimit:sim_sms:${phone}`,
+    rateLimitSimSms: (userId) => `ratelimit:sim_sms:${userId}`,
 };

@@ -75,5 +75,6 @@ export const keys = {
   msg91SignupPending: (signupToken: string) => `msg91:signup:${signupToken}`,
   /** SIM SMS binding challenge for authenticated user. TTL 2 min. */
   simSmsChallenge: (userId: string) => `sim_sms:${userId}`,
-  rateLimitSimSms: (phone: string) => `ratelimit:sim_sms:${phone}`,
+  /** SIM SMS send counter — per user, only incremented after successful delivery. TTL 15 min. */
+  rateLimitSimSms: (userId: string) => `ratelimit:sim_sms:${userId}`,
 };

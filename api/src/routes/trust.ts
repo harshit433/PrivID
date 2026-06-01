@@ -249,19 +249,28 @@ trustRouter.post('/verify/device/sim-sms/initiate', requireAuth, async (req: Req
       throw new AppError(400, 'PHONE_NOT_FOUND', 'Verified phone number not found on your account.');
     }
 
-    const rateLimitKey = keys.rateLimitSimSms(user.phone_e164);
-    const attempts = await redis.incr(rateLimitKey);
-    if (attempts === 1) await redis.expire(rateLimitKey, 600);
-    if (attempts > 3) {
-      throw new AppError(429, 'RATE_LIMITED', 'Too many SIM verification SMS requests. Try again in 10 minutes.');
+    const rateLimitKey = keys.rateLimitSimSms(userId);
+    const priorAttempts = await redis.get(rateLimitKey);
+    const attempts = priorAttempts ? parseInt(priorAttempts, 10) : 0;
+    if (attempts >= 5) {
+      const ttl = await redis.ttl(rateLimitKey);
+      const waitMin = ttl > 0 ? Math.ceil(ttl / 60) : 10;
+      throw new AppError(
+        429,
+        'RATE_LIMITED',
+        `Too many SIM verification SMS sent. Try again in about ${waitMin} minute${waitMin === 1 ? '' : 's'}.`,
+      );
     }
 
     const code = generateSimSmsCode();
     const challengeId = crypto.randomUUID();
     const codeHash = hashSimSmsCode(userId, code);
 
-    // Send SMS first — don't store challenge if delivery fails.
+    // Send SMS first — don't store challenge or count rate limit if delivery fails.
     await sendSimVerificationSms(user.phone_e164, code, body.app_hash);
+
+    const newAttempts = await redis.incr(rateLimitKey);
+    if (newAttempts === 1) await redis.expire(rateLimitKey, 900);
 
     await redis.set(
       keys.simSmsChallenge(userId),

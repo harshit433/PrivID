@@ -18,6 +18,7 @@ import { statusRouter } from './routes/status';
 import { subscriptionsRouter } from './routes/subscriptions';
 import { businessRegisterRouter } from './routes/businessRegister';
 import { adminRouter } from './routes/admin';
+import { mountBusinessSuite } from './mountBusinessSuite';
 import { errorHandler } from './middleware/errorHandler';
 import { apiLimiter, publicLimiter } from './middleware/rateLimit';
 import { getPool, connectRedis, getRedis } from '@trustroute/shared';
@@ -141,6 +142,8 @@ app.use('/liveness', livenessRouter);
 app.use('/numbers', apiLimiter, numbersRouter);
 // Admin: internal-only, gated by x-admin-key (should be behind VPN in prod)
 app.use('/admin', adminRouter);
+// Business suite (API key auth) — same routes as business-api :3002
+mountBusinessSuite(app);
 if (process.env.NODE_ENV !== 'production') {
   app.use('/simulation', simulationRouter);
 }

@@ -31,13 +31,15 @@ WORKDIR /app
 
 COPY package.json package-lock.json ./
 COPY api/package.json ./api/
+COPY business-api/package.json ./business-api/
 COPY shared/package.json ./shared/
 COPY signaling/package.json ./signaling/
 COPY worker/package.json ./worker/
 
-RUN npm ci --workspace=@trustroute/api --workspace=@trustroute/shared --include-workspace-root
+RUN npm ci --workspace=@trustroute/api --workspace=@trustroute/business-api --workspace=@trustroute/shared --include-workspace-root
 
 COPY shared ./shared
+COPY business-api ./business-api
 COPY api ./api
 COPY db ./db
 COPY docker/api-entrypoint.sh /entrypoint.sh

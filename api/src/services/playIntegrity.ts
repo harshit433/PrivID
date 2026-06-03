@@ -4,8 +4,43 @@ import { logger } from '../utils/logger';
 
 const PLAY_INTEGRITY_SCOPE = 'https://www.googleapis.com/auth/playintegrity';
 const PACKAGE_NAME = process.env.ANDROID_PACKAGE_NAME ?? 'com.prividapp';
+/** Match nonce TTL in trust router (5 min) with small clock skew buffer. */
+const MAX_TOKEN_AGE_MS = 5 * 60 * 1000 + 30_000;
 
 let authClient: GoogleAuth | null = null;
+
+export type IntegrityFailureReason =
+  | 'NOT_CONFIGURED'
+  | 'DECODE_FAILED'
+  | 'NONCE_MISMATCH'
+  | 'PACKAGE_MISMATCH'
+  | 'STALE_TOKEN'
+  | 'DEVICE_FAILED'
+  | 'APP_FAILED'
+  | 'LICENSE_FAILED';
+
+export type IntegrityCheckResult =
+  | { ok: true }
+  | { ok: false; reason: IntegrityFailureReason; details?: Record<string, unknown> };
+
+type TokenPayloadExternal = {
+  requestDetails?: {
+    requestPackageName?: string;
+    nonce?: string;
+    timestampMillis?: string;
+  };
+  deviceIntegrity?: {
+    deviceRecognitionVerdict?: string[];
+  };
+  appIntegrity?: {
+    appRecognitionVerdict?: string;
+    packageName?: string;
+    versionCode?: string;
+  };
+  accountDetails?: {
+    appLicensingVerdict?: string;
+  };
+};
 
 function getServiceAccountJson(): string | null {
   return (
@@ -17,6 +52,18 @@ function getServiceAccountJson(): string | null {
 
 export function isPlayIntegrityConfigured(): boolean {
   return Boolean(getServiceAccountJson() || process.env.GOOGLE_APPLICATION_CREDENTIALS);
+}
+
+/** Firebase / sideload APKs before Play publish — set on server only for internal testing. */
+export function isPlayIntegritySideloadAllowed(): boolean {
+  return process.env.PLAY_INTEGRITY_ALLOW_SIDELOAD === 'true';
+}
+
+/** Production Play Store enforcement (default true in production). */
+export function isPlayIntegrityStrict(): boolean {
+  if (process.env.NODE_ENV !== 'production') return false;
+  if (isPlayIntegritySideloadAllowed()) return false;
+  return process.env.PLAY_INTEGRITY_STRICT !== 'false';
 }
 
 function getAuth(): GoogleAuth {
@@ -36,56 +83,140 @@ function isDevFallbackToken(token: string): boolean {
   return token.startsWith('dev-android-') || token.startsWith('dev-fallback-');
 }
 
-type IntegrityVerdict = {
-  deviceRecognitionVerdict?: string[];
-  appRecognitionVerdict?: string;
-};
-
-function passesDeviceVerdict(verdict: IntegrityVerdict | undefined): boolean {
-  const device = verdict?.deviceRecognitionVerdict ?? [];
+function devicePasses(verdicts: string[] | undefined, strict: boolean): boolean {
+  const device = verdicts ?? [];
+  if (device.length === 0) return false;
+  if (strict) {
+    return device.some((v) =>
+      v === 'MEETS_DEVICE_INTEGRITY' || v === 'MEETS_STRONG_INTEGRITY',
+    );
+  }
   return device.some((v) =>
-    ['MEETS_DEVICE_INTEGRITY', 'MEETS_BASIC_INTEGRITY', 'MEETS_STRONG_INTEGRITY'].includes(v),
+    ['MEETS_DEVICE_INTEGRITY', 'MEETS_STRONG_INTEGRITY', 'MEETS_BASIC_INTEGRITY'].includes(v),
   );
 }
 
-function passesAppVerdict(verdict: IntegrityVerdict | undefined): boolean {
-  const app = verdict?.appRecognitionVerdict;
-  if (!app) return true;
-  return app === 'PLAY_RECOGNIZED' || app === 'UNRECOGNIZED_VERSION';
+function appPasses(appVerdict: string | undefined, strict: boolean): boolean {
+  if (!appVerdict) return !strict;
+  if (strict) return appVerdict === 'PLAY_RECOGNIZED';
+  if (isPlayIntegritySideloadAllowed()) {
+    return appVerdict === 'PLAY_RECOGNIZED' || appVerdict === 'UNRECOGNIZED_VERSION';
+  }
+  return appVerdict === 'PLAY_RECOGNIZED' || appVerdict === 'UNRECOGNIZED_VERSION';
 }
 
-export async function verifyAndroidIntegrityToken(token: string): Promise<boolean> {
+function licensePasses(licenseVerdict: string | undefined, strict: boolean): boolean {
+  if (!strict) {
+    if (!licenseVerdict || licenseVerdict === 'UNEVALUATED') return true;
+    if (isPlayIntegritySideloadAllowed()) {
+      return licenseVerdict === 'LICENSED' || licenseVerdict === 'UNLICENSED' || licenseVerdict === 'UNEVALUATED';
+    }
+    return licenseVerdict === 'LICENSED' || licenseVerdict === 'UNLICENSED';
+  }
+  return licenseVerdict === 'LICENSED';
+}
+
+function validateRequestDetails(
+  details: TokenPayloadExternal['requestDetails'],
+  expectedNonce: string | undefined,
+): IntegrityCheckResult | null {
+  if (!details?.requestPackageName || details.requestPackageName !== PACKAGE_NAME) {
+    return {
+      ok: false,
+      reason: 'PACKAGE_MISMATCH',
+      details: { requestPackageName: details?.requestPackageName, expected: PACKAGE_NAME },
+    };
+  }
+
+  if (expectedNonce) {
+    if (!details.nonce || details.nonce !== expectedNonce) {
+      return {
+        ok: false,
+        reason: 'NONCE_MISMATCH',
+        details: { hasNonce: Boolean(details.nonce) },
+      };
+    }
+  }
+
+  if (details.timestampMillis) {
+    const ts = Number(details.timestampMillis);
+    if (!Number.isFinite(ts) || Date.now() - ts > MAX_TOKEN_AGE_MS) {
+      return {
+        ok: false,
+        reason: 'STALE_TOKEN',
+        details: { timestampMillis: details.timestampMillis },
+      };
+    }
+  }
+
+  return null;
+}
+
+export function integrityFailureMessage(reason: IntegrityFailureReason): string {
+  switch (reason) {
+    case 'NOT_CONFIGURED':
+      return 'Device attestation is not configured on the server. Contact support.';
+    case 'NONCE_MISMATCH':
+      return 'Security check expired. Please retry device verification.';
+    case 'PACKAGE_MISMATCH':
+      return 'This install does not match the official TrustRoute app.';
+    case 'STALE_TOKEN':
+      return 'Security check timed out. Please retry.';
+    case 'DEVICE_FAILED':
+      return 'This device did not pass Google device integrity (rooted, emulator, or modified system).';
+    case 'APP_FAILED':
+      return isPlayIntegrityStrict()
+        ? 'Install TrustRoute from Google Play. Modified or unofficial builds are not supported.'
+        : 'This app build could not be verified. Use Google Play or an approved test build.';
+    case 'LICENSE_FAILED':
+      return 'This install is not licensed through Google Play. Install from the Play Store.';
+    case 'DECODE_FAILED':
+    default:
+      return 'Google Play Integrity could not verify this install. Try again or install from Google Play.';
+  }
+}
+
+/**
+ * Decode and validate a Play Integrity token (classic nonce flow).
+ * @param expectedNonce — must match the nonce issued by GET /trust/nonce (production).
+ */
+export async function verifyAndroidIntegrityToken(
+  token: string,
+  expectedNonce?: string,
+): Promise<IntegrityCheckResult> {
   if (process.env.NODE_ENV !== 'production' && isDevFallbackToken(token)) {
-    return true;
+    return { ok: true };
+  }
+
+  if (process.env.NODE_ENV === 'production' && !isPlayIntegrityConfigured()) {
+    logger.error('playIntegrity', 'Production requires GOOGLE_PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON');
+    return { ok: false, reason: 'NOT_CONFIGURED' };
   }
 
   if (!isPlayIntegrityConfigured()) {
     logger.warn(
       'playIntegrity',
-      'Credentials not configured — accepting token (set GOOGLE_PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON for enforcement)',
+      'Credentials not configured — skipping enforcement (dev/staging only)',
     );
-    return true;
+    return { ok: true };
   }
 
   if (isDevFallbackToken(token)) {
-    return false;
+    return { ok: false, reason: 'APP_FAILED', details: { devToken: true } };
   }
+
+  const strict = isPlayIntegrityStrict();
 
   try {
     const client = await getAuth().getClient();
     const accessToken = await client.getAccessToken();
     if (!accessToken.token) {
       logger.error('playIntegrity', 'Failed to obtain Google access token');
-      return false;
+      return { ok: false, reason: 'DECODE_FAILED' };
     }
 
     const url = `https://playintegrity.googleapis.com/v1/${PACKAGE_NAME}:decodeIntegrityToken`;
-    const { data } = await axios.post<{
-      tokenPayloadExternal?: {
-        deviceIntegrity?: IntegrityVerdict;
-        appIntegrity?: IntegrityVerdict;
-      };
-    }>(
+    const { data } = await axios.post<{ tokenPayloadExternal?: TokenPayloadExternal }>(
       url,
       { integrityToken: token },
       {
@@ -98,20 +229,50 @@ export async function verifyAndroidIntegrityToken(token: string): Promise<boolea
     );
 
     const payload = data.tokenPayloadExternal;
-    const deviceOk = passesDeviceVerdict(payload?.deviceIntegrity);
-    const appOk = passesAppVerdict(payload?.appIntegrity);
-
-    if (!deviceOk || !appOk) {
-      logger.warn('playIntegrity', 'Integrity verdict failed', {
-        device: payload?.deviceIntegrity?.deviceRecognitionVerdict,
-        app: payload?.appIntegrity?.appRecognitionVerdict,
-      });
+    if (!payload) {
+      return { ok: false, reason: 'DECODE_FAILED', details: { emptyPayload: true } };
     }
 
-    return deviceOk && appOk;
+    const requestError = validateRequestDetails(payload.requestDetails, expectedNonce);
+    if (requestError) return requestError;
+
+    const expectedVersion = process.env.ANDROID_EXPECTED_VERSION_CODE;
+    if (
+      expectedVersion &&
+      payload.appIntegrity?.versionCode &&
+      payload.appIntegrity.versionCode !== expectedVersion
+    ) {
+      return {
+        ok: false,
+        reason: 'APP_FAILED',
+        details: {
+          versionCode: payload.appIntegrity.versionCode,
+          expectedVersion,
+        },
+      };
+    }
+
+    const deviceOk = devicePasses(payload.deviceIntegrity?.deviceRecognitionVerdict, strict);
+    const appOk = appPasses(payload.appIntegrity?.appRecognitionVerdict, strict);
+    const licenseOk = licensePasses(payload.accountDetails?.appLicensingVerdict, strict);
+
+    if (!deviceOk || !appOk || !licenseOk) {
+      logger.warn('playIntegrity', 'Integrity verdict failed', {
+        strict,
+        device: payload.deviceIntegrity?.deviceRecognitionVerdict,
+        app: payload.appIntegrity?.appRecognitionVerdict,
+        license: payload.accountDetails?.appLicensingVerdict,
+        versionCode: payload.appIntegrity?.versionCode,
+      });
+      if (!deviceOk) return { ok: false, reason: 'DEVICE_FAILED' };
+      if (!appOk) return { ok: false, reason: 'APP_FAILED' };
+      return { ok: false, reason: 'LICENSE_FAILED' };
+    }
+
+    return { ok: true };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error('playIntegrity', 'decodeIntegrityToken failed', { error: message });
-    return false;
+    return { ok: false, reason: 'DECODE_FAILED', details: { error: message } };
   }
 }

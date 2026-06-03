@@ -30,7 +30,11 @@ import { getPool, connectRedis, getRedis } from '@trustroute/shared';
 import { isThreediviConfigured } from './services/threedivi';
 import { isStreamConfigured } from './services/stream';
 import { isLivenessConfigured } from './services/liveness';
-import { isPlayIntegrityConfigured } from './services/playIntegrity';
+import {
+  isPlayIntegrityConfigured,
+  isPlayIntegrityStrict,
+  isPlayIntegritySideloadAllowed,
+} from './services/playIntegrity';
 import { logger } from './utils/logger';
 
 const app = express();
@@ -68,6 +72,8 @@ app.get('/health', async (_req, res) => {
       stream_chat_configured: isStreamConfigured(),
       liveness_configured: isLivenessConfigured(),
       play_integrity_configured: isPlayIntegrityConfigured(),
+      play_integrity_strict: isPlayIntegrityStrict(),
+      play_integrity_allow_sideload: isPlayIntegritySideloadAllowed(),
     });
   } catch (err) {
     res.status(503).json({ ok: false, error: 'DB unavailable' });

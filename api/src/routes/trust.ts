@@ -6,7 +6,11 @@ import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 import { recomputeAndPersist, computeTrustScore } from '../services/trustScore';
 import { isLivenessConfigured, checkLiveness, livenessThreshold } from '../services/liveness';
-import { verifyAndroidIntegrityToken } from '../services/playIntegrity';
+import {
+  verifyAndroidIntegrityToken,
+  integrityFailureMessage,
+  type IntegrityCheckResult,
+} from '../services/playIntegrity';
 import { logger } from '../utils/logger';
 import { verifyMsg91AccessToken } from '../services/msg91';
 import { phonesMatch } from '../utils/phoneMatch';
@@ -165,16 +169,17 @@ trustRouter.post('/verify/device/integrity', requireAuth, async (req: Request, r
       throw new AppError(400, 'INVALID_NONCE', 'Integrity nonce is invalid or expired. Please retry.');
     }
 
-    const isVerified =
-      process.env.NODE_ENV !== 'production'
-        ? true
-        : await verifyDeviceIntegrityToken(body.platform, body.integrity_token);
+    const integrityResult = await verifyDeviceIntegrityToken(
+      body.platform,
+      body.integrity_token,
+      body.nonce,
+    );
 
-    if (!isVerified) {
+    if (!integrityResult.ok) {
       throw new AppError(
         400,
         'DEVICE_INTEGRITY_FAILED',
-        'Google Play Integrity could not verify this install. Install from Google Play or a registered test build.',
+        integrityFailureMessage(integrityResult.reason),
       );
     }
 
@@ -481,12 +486,18 @@ trustRouter.post('/verify/device', requireAuth, async (req: Request, res: Respon
     }
 
     // ── 3. Play Integrity / DeviceCheck token verification ────────────────────
-    const isVerified = process.env.NODE_ENV !== 'production'
-      ? true
-      : await verifyDeviceIntegrityToken(body.platform, body.integrity_token);
+    const integrityResult = await verifyDeviceIntegrityToken(
+      body.platform,
+      body.integrity_token,
+      body.nonce,
+    );
 
-    if (!isVerified) {
-      throw new AppError(400, 'DEVICE_INTEGRITY_FAILED', 'Device integrity check failed.');
+    if (!integrityResult.ok) {
+      throw new AppError(
+        400,
+        'DEVICE_INTEGRITY_FAILED',
+        integrityFailureMessage(integrityResult.reason),
+      );
     }
 
     // ── 4. SIM-binding / device fingerprint continuity ────────────────────────
@@ -565,15 +576,19 @@ trustRouter.post('/verify/device', requireAuth, async (req: Request, res: Respon
 });
 
 // Validates Play Integrity (Android) or DeviceCheck (iOS) token server-side.
-async function verifyDeviceIntegrityToken(platform: string, token: string): Promise<boolean> {
+async function verifyDeviceIntegrityToken(
+  platform: string,
+  token: string,
+  expectedNonce?: string,
+): Promise<IntegrityCheckResult> {
   if (platform === 'ios') {
     // DeviceCheck not wired yet — same as before.
-    return true;
+    return { ok: true };
   }
   if (platform === 'android') {
-    return verifyAndroidIntegrityToken(token);
+    return verifyAndroidIntegrityToken(token, expectedNonce);
   }
-  return false;
+  return { ok: false, reason: 'DECODE_FAILED' };
 }
 
 // ─── POST /trust/verify/liveness/initiate ─────────────────────────────────────

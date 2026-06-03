@@ -16,6 +16,7 @@ import { simulationRouter } from './routes/simulation';
 import { numbersRouter } from './routes/numbers';
 import { statusRouter } from './routes/status';
 import { subscriptionsRouter } from './routes/subscriptions';
+import { businessRegisterRouter } from './routes/businessRegister';
 import { adminRouter } from './routes/admin';
 import { errorHandler } from './middleware/errorHandler';
 import { apiLimiter, publicLimiter } from './middleware/rateLimit';
@@ -118,6 +119,7 @@ app.get('/debug/call-health', async (_req, res) => {
 });
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
+app.use('/register', publicLimiter, businessRegisterRouter);
 app.use('/auth', publicLimiter, authRouter);
 app.use('/users', apiLimiter, usersRouter);
 app.use('/connections', apiLimiter, connectionsRouter);

@@ -611,6 +611,34 @@ trustRouter.post('/verify/liveness/initiate', requireAuth, async (req: Request, 
   }
 });
 
+// ─── POST /trust/verify/liveness/skip ─────────────────────────────────────────
+// Optional onboarding step — marks liveness as skipped (no trust points).
+
+trustRouter.post('/verify/liveness/skip', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await query(
+      `INSERT INTO trust_factors (user_id, factor_type, status, provider, score_delta, metadata, verified_at)
+       VALUES ($1, 'liveness_check', 'expired', 'skipped', 0, $2::jsonb, NULL)
+       ON CONFLICT (user_id, factor_type) WHERE is_latest = TRUE
+       DO UPDATE SET
+         status = 'expired',
+         provider = 'skipped',
+         score_delta = 0,
+         provider_ref = NULL,
+         metadata = EXCLUDED.metadata,
+         verified_at = NULL`,
+      [req.user!.sub, JSON.stringify({ skipped: true, optional: true })],
+    );
+    const breakdown = await recomputeAndPersist(req.user!.sub);
+    res.json({
+      ok: true,
+      data: { score: breakdown.total, tier: breakdown.tier, skipped: true },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ─── POST /trust/verify/liveness/complete ─────────────────────────────────────
 // Receives the captured selfie (base64), runs passive liveness via the managed
 // provider and enforces the confidence threshold. On failure the factor is

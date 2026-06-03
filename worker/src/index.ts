@@ -6,6 +6,7 @@
  * Cron schedule:
  *   mass-outreach scan        every  5 min
  *   channel-expiry scan       every  5 min
+ *   status-expiry scan        every  5 min
  *   connection-expiry scan    every 10 min
  *   ml-feedback scan          every  6 h
  *   shadow-score recompute    once nightly (02:00)
@@ -29,6 +30,7 @@ import { startConnectionExpiryWorker, enqueueConnectionExpiryScan } from './jobs
 import { startTokenRotationWorker, enqueueTokenRotation } from './jobs/tokenRotation';
 import { startShadowScoreRecomputeWorker, enqueueShadowRecompute } from './jobs/shadowScoreRecompute';
 import { startMLFeedbackWorker, enqueueMLFeedbackScan } from './jobs/mlFeedback';
+import { startStatusExpiryWorker, enqueueStatusExpiryScan } from './jobs/statusExpiry';
 import { isMLAvailable } from './utils/mlClient';
 import { logger } from './utils/logger';
 
@@ -53,6 +55,7 @@ async function main() {
     startTokenRotationWorker(),
     startShadowScoreRecomputeWorker(),
     startMLFeedbackWorker(),
+    startStatusExpiryWorker(),
   ];
 
   logger.info(WORKER, `${workers.length} workers running`);
@@ -63,6 +66,7 @@ async function main() {
     enqueueConnectionExpiryScan(),
     enqueueTokenRotation(),
     enqueueMLFeedbackScan(),
+    enqueueStatusExpiryScan(),
   ]);
 
   // ── Cron ticks ───────────────────────────────────────────────────────────
@@ -78,6 +82,7 @@ async function main() {
   cron('mass-outreach scan',      enqueueMassOutreachScan,      5  * 60 * 1_000);
   cron('channel-expiry scan',     enqueueChannelExpiryScan,     5  * 60 * 1_000);
   cron('connection-expiry scan',  enqueueConnectionExpiryScan,  10 * 60 * 1_000);
+  cron('status-expiry scan',      enqueueStatusExpiryScan,      5  * 60 * 1_000);
   cron('ml-feedback scan',        enqueueMLFeedbackScan,        6  * 60 * 60 * 1_000);
   cron('token cleanup',           enqueueTokenRotation,         24 * 60 * 60 * 1_000);
 

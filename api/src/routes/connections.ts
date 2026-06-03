@@ -97,6 +97,61 @@ connectionsRouter.post('/', requireAuth, async (req: Request, res: Response, nex
   }
 });
 
+const CONNECTION_SELECT = `
+  SELECT
+    c.connection_id,
+    c.connection_type,
+    c.temporary_expires_at,
+    c.daily_call_limit,
+    c.created_at,
+    u.user_id,
+    u.handle,
+    COALESCE(NULLIF(TRIM(c.contact_name), ''), u.display_name) AS display_name,
+    u.avatar_url,
+    u.trust_tier,
+    u.trust_score,
+    COALESCE(r.connection_type, 'unknown') AS reverse_connection_type,
+    r.daily_call_limit AS reverse_daily_call_limit,
+    r.temporary_expires_at AS reverse_temporary_expires_at
+  FROM connections c
+  JOIN users u ON u.user_id = c.contact_id
+  LEFT JOIN connections r ON r.owner_id = c.contact_id AND r.contact_id = c.owner_id`;
+
+// ─── PATCH /connections/:id — contact display name (your label for them) ───────
+
+const contactNameSchema = z.object({
+  contact_name: z.string().min(1).max(60),
+});
+
+connectionsRouter.patch('/:id', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = contactNameSchema.parse(req.body);
+    const ownerId = req.user!.sub;
+
+    const existing = await queryOne<ConnectionRow>(
+      `SELECT connection_id FROM connections WHERE connection_id = $1 AND owner_id = $2`,
+      [req.params.id, ownerId],
+    );
+    if (!existing) throw new AppError(404, 'CONNECTION_NOT_FOUND', 'Connection not found.');
+
+    await query(
+      `UPDATE connections SET contact_name = $1 WHERE connection_id = $2 AND owner_id = $3`,
+      [body.contact_name.trim(), req.params.id, ownerId],
+    );
+
+    const [row] = await query(
+      `${CONNECTION_SELECT} WHERE c.connection_id = $1 AND c.owner_id = $2`,
+      [req.params.id, ownerId],
+    );
+    if (!row) throw new AppError(404, 'CONNECTION_NOT_FOUND', 'Connection not found.');
+
+    res.json({ ok: true, data: row });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
 // ─── PATCH /connections/:id/permission ───────────────────────────────────────
 
 const updateSchema = z.object({

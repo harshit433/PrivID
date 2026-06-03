@@ -1,5 +1,14 @@
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import {
+  assertImageContentType,
+  assertVideoContentType,
+  extensionForContentType,
+  isStatusS3Configured,
+  publicUrlForKey,
+  STATUS_MAX_IMAGE_BYTES,
+  statusBucket,
+} from './statusMedia';
 
 function isS3Configured(): boolean {
   return Boolean(
@@ -71,4 +80,68 @@ export async function uploadAvatarBuffer(
   // Works fine in dev / when S3 isn't configured or fails.
   const b64 = imageBuffer.toString('base64');
   return `data:${contentType};base64,${b64}`;
+}
+
+function statusKey(userId: string, contentType: string): string {
+  const ext = extensionForContentType(contentType);
+  return `status/${userId}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
+}
+
+export async function generateStatusUploadUrl(
+  userId: string,
+  contentType: string,
+  kind: 'image' | 'video',
+): Promise<{ uploadUrl: string; publicUrl: string; key: string }> {
+  if (!isStatusS3Configured()) {
+    throw new Error('Status media S3 is not configured.');
+  }
+  if (kind === 'image') assertImageContentType(contentType);
+  else assertVideoContentType(contentType);
+
+  const bucket = statusBucket();
+  const key = statusKey(userId, contentType);
+  const command = new PutObjectCommand({ Bucket: bucket, Key: key, ContentType: contentType });
+  const uploadUrl = await getSignedUrl(getS3Client(), command, { expiresIn: 600 });
+  return { uploadUrl, publicUrl: publicUrlForKey(key), key };
+}
+
+export async function uploadStatusImageBuffer(
+  userId: string,
+  imageBuffer: Buffer,
+  contentType: string,
+): Promise<string> {
+  assertImageContentType(contentType);
+  if (imageBuffer.length < 50 || imageBuffer.length > STATUS_MAX_IMAGE_BYTES) {
+    throw new Error(`Image must be between 50 bytes and ${STATUS_MAX_IMAGE_BYTES} bytes.`);
+  }
+  if (!isStatusS3Configured()) {
+    const b64 = imageBuffer.toString('base64');
+    return `data:${contentType};base64,${b64}`;
+  }
+  const bucket = statusBucket();
+  const key = statusKey(userId, contentType);
+  await getS3Client().send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: imageBuffer,
+      ContentType: contentType,
+    }),
+  );
+  return publicUrlForKey(key);
+}
+
+export async function deleteStatusMediaByUrl(mediaUrl: string): Promise<void> {
+  if (!isStatusS3Configured() || !mediaUrl.startsWith('http')) return;
+  try {
+    const bucket = statusBucket();
+    const region = process.env.AWS_REGION!;
+    const base = `https://${bucket}.s3.${region}.amazonaws.com/`;
+    if (!mediaUrl.startsWith(base)) return;
+    const key = mediaUrl.slice(base.length).split('?')[0];
+    if (!key.startsWith('status/')) return;
+    await getS3Client().send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+  } catch (err) {
+    console.warn('[S3] Status media delete failed:', (err as Error).message);
+  }
 }

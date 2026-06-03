@@ -46,10 +46,15 @@ CREATE INDEX IF NOT EXISTS idx_obs_observer
   ON dialer_observations (observer_id, observed_at DESC);
 
 -- Prevent a single observer from submitting more than one observation
--- for the same number within 5 minutes (anti-spam, allows re-observation
--- after enough time passes for follow-up blocks or saves)
+-- for the same number within the same UTC hour (anti-spam).
+-- date_trunc(timestamptz) is STABLE (timezone-dependent); AT TIME ZONE 'UTC'
+-- yields timestamp without time zone so the expression is IMMUTABLE for indexes.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_obs_dedup
-  ON dialer_observations (observer_id, phone_hash, date_trunc('hour', observed_at));
+  ON dialer_observations (
+    observer_id,
+    phone_hash,
+    date_trunc('hour', observed_at AT TIME ZONE 'UTC')
+  );
 
 -- ─── Aggregated shadow scores ─────────────────────────────────────────────────
 

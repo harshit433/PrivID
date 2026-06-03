@@ -70,7 +70,7 @@ async function getFcmToken(userId: string): Promise<string | null> {
   return row?.fcm_token ?? null;
 }
 
-/** Log an admin action to the audit table. */
+/** Log an admin action against a user (target_id → users.user_id). */
 async function logAction(
   targetId: string,
   action:   ResolutionAction | string,
@@ -83,6 +83,28 @@ async function logAction(
      VALUES ($1, $2, $3, $4, $5)
      RETURNING action_id`,
     [targetId, action, adminRef ?? null, note ?? null, JSON.stringify(metadata)],
+  );
+  return row.action_id;
+}
+
+/** Business actions use business_id in metadata — admin_actions.target_id FK is users only. */
+async function logBusinessAction(
+  businessId: string,
+  action: string,
+  note: string | null | undefined,
+  metadata: Record<string, unknown> = {},
+  adminRef?: string,
+): Promise<string> {
+  const [row] = await query<{ action_id: string }>(
+    `INSERT INTO admin_actions (target_id, action, admin_ref, note, metadata)
+     VALUES (NULL, $1, $2, $3, $4)
+     RETURNING action_id`,
+    [
+      action,
+      adminRef ?? null,
+      note ?? null,
+      JSON.stringify({ business_id: businessId, ...metadata }),
+    ],
   );
   return row.action_id;
 }
@@ -1043,15 +1065,30 @@ adminRouter.post('/businesses/:id/approve', async (req: Request, res: Response, 
     const { rawKey, keyHash } = generateApiKey();
     const plan = body.plan ?? 'starter';
 
-    await query(
-      `UPDATE businesses
-       SET status = 'verified', api_key_hash = $1, plan = $2::business_plan,
-           verified_at = NOW(), rejection_reason = NULL, updated_at = NOW()
-       WHERE business_id = $3`,
-      [keyHash, plan, req.params.id],
-    );
+    await withTransaction(async (client) => {
+      const updated = await client.query(
+        `UPDATE businesses
+         SET status = 'verified', api_key_hash = $1, plan = $2::business_plan,
+             verified_at = NOW(), rejection_reason = NULL, updated_at = NOW()
+         WHERE business_id = $3 AND status = 'pending'
+         RETURNING business_id`,
+        [keyHash, plan, req.params.id],
+      );
+      if (!updated.rows[0]) {
+        throw new AppError(409, 'NOT_PENDING', 'Only pending businesses can be approved.');
+      }
 
-    await logAction(req.params.id, 'business_approved', null, { plan }, req.headers['x-admin-ref'] as string);
+      await client.query(
+        `INSERT INTO admin_actions (target_id, action, admin_ref, note, metadata)
+         VALUES (NULL, $1, $2, $3, $4)`,
+        [
+          'business_approved',
+          (req.headers['x-admin-ref'] as string) ?? null,
+          null,
+          JSON.stringify({ business_id: req.params.id, plan }),
+        ],
+      );
+    });
 
     res.json({
       ok: true,
@@ -1082,12 +1119,44 @@ adminRouter.post('/businesses/:id/reject', async (req: Request, res: Response, n
     );
     if (!row) throw new AppError(404, 'NOT_FOUND', 'Pending business not found.');
 
-    await logAction(req.params.id, 'business_rejected', reason, {}, req.headers['x-admin-ref'] as string);
+    await logBusinessAction(req.params.id, 'business_rejected', reason, {}, req.headers['x-admin-ref'] as string);
     res.json({ ok: true, data: { business_id: row.business_id, status: 'rejected' } });
   } catch (err) {
     if (err instanceof z.ZodError) {
       return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
     }
+    next(err);
+  }
+});
+
+/** Re-issue API key for a verified business (e.g. approve succeeded but audit log failed). */
+adminRouter.post('/businesses/:id/issue-api-key', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const biz = await queryOne<{ business_id: string; status: string }>(
+      `SELECT business_id, status::text AS status FROM businesses WHERE business_id = $1`,
+      [req.params.id],
+    );
+    if (!biz) throw new AppError(404, 'NOT_FOUND', 'Business not found.');
+    if (biz.status !== 'verified') {
+      throw new AppError(409, 'NOT_VERIFIED', 'Only verified businesses can receive a new API key.');
+    }
+
+    const { rawKey, keyHash } = generateApiKey();
+    await query(
+      `UPDATE businesses SET api_key_hash = $1, updated_at = NOW() WHERE business_id = $2`,
+      [keyHash, req.params.id],
+    );
+    await logBusinessAction(req.params.id, 'business_api_key_issued', null, {}, req.headers['x-admin-ref'] as string);
+
+    res.json({
+      ok: true,
+      data: {
+        business_id: req.params.id,
+        api_key: rawKey,
+        message: 'Store this API key securely — it will not be shown again.',
+      },
+    });
+  } catch (err) {
     next(err);
   }
 });
@@ -1103,9 +1172,16 @@ adminRouter.post('/businesses/:id/suspend', async (req: Request, res: Response, 
     );
     if (!row) throw new AppError(404, 'NOT_FOUND', 'Verified business not found.');
 
-    await logAction(req.params.id, 'business_suspended', null, {}, req.headers['x-admin-ref'] as string);
+    await logBusinessAction(req.params.id, 'business_suspended', null, {}, req.headers['x-admin-ref'] as string);
     res.json({ ok: true, data: { business_id: row.business_id, status: 'suspended' } });
   } catch (err) {
     next(err);
   }
+});
+
+adminRouter.use((_req: Request, res: Response) => {
+  res.status(404).json({
+    ok: false,
+    error: { code: 'NOT_FOUND', message: 'Admin endpoint not found.' },
+  });
 });

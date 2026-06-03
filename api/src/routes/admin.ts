@@ -897,6 +897,58 @@ adminRouter.get('/ml/status', async (_req: Request, res: Response, next: NextFun
   }
 });
 
+// ─── GET /admin/users — paginated directory ───────────────────────────────────
+
+adminRouter.get('/users', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '50'), 10) || 50));
+    const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0);
+    const q = (req.query.q as string | undefined)?.trim();
+
+    const hasSearch = !!q;
+    const searchArg = hasSearch ? `%${q}%` : null;
+
+    const [rows, countRow] = await Promise.all([
+      query<{
+        user_id: string;
+        handle: string;
+        display_name: string | null;
+        phone_e164: string | null;
+        trust_tier: string;
+        trust_score: number;
+        is_active: boolean;
+        is_under_review: boolean;
+        created_at: Date;
+      }>(
+        `SELECT user_id, handle, display_name, phone_e164,
+                trust_tier::text AS trust_tier, trust_score, is_active, is_under_review, created_at
+         FROM users
+         WHERE ($1::text IS NULL OR handle ILIKE $1 OR display_name ILIKE $1 OR phone_e164 ILIKE $1)
+         ORDER BY created_at DESC
+         LIMIT $2 OFFSET $3`,
+        [searchArg, limit, offset],
+      ),
+      queryOne<{ total: string }>(
+        `SELECT COUNT(*)::text AS total FROM users
+         WHERE ($1::text IS NULL OR handle ILIKE $1 OR display_name ILIKE $1 OR phone_e164 ILIKE $1)`,
+        [searchArg],
+      ),
+    ]);
+
+    res.json({
+      ok: true,
+      data: {
+        users: rows,
+        total: parseInt(countRow?.total ?? '0', 10),
+        limit,
+        offset,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ─── Business Suite admin ─────────────────────────────────────────────────────
 
 adminRouter.get('/businesses/stats', async (_req: Request, res: Response, next: NextFunction) => {

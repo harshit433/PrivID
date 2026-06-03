@@ -80,8 +80,17 @@ export interface ReachabilityChannelRow {
   status: ChannelStatus;
   daily_limit: number;
   total_limit: number | null;
+  use_count: number;
   expires_at: Date | null;
   created_at: Date;
+  updated_at: Date;
+}
+
+/** Extended type for the /channels/resolve/:token endpoint (JOIN with users). */
+export interface ReachabilityChannelPublic extends ReachabilityChannelRow {
+  handle: string;
+  display_name: string | null;
+  trust_tier: TrustTier;
 }
 
 export interface CallRow {
@@ -91,10 +100,72 @@ export interface CallRow {
   call_type: CallType;
   status: CallStatus;
   channel_id: string | null;
+  webrtc_room_id: string | null;
   started_at: Date | null;
   ended_at: Date | null;
   duration_seconds: number | null;
+  decline_reason: string | null;
   created_at: Date;
+  updated_at: Date;
+}
+
+// ─── Shadow trust ────────────────────────────────────────────────────────────
+
+export interface ShadowNumberRow {
+  phone_hash:        string;
+  pick_rate:         number;
+  declined_rate:     number;
+  block_rate:        number;
+  save_rate:         number;
+  hung_fast_rate:    number;
+  observation_count: number;
+  shadow_score:      number;    // 0–100; 50 = neutral / insufficient data
+  last_updated_at:   Date;
+}
+
+export type DialerOutcome = 'picked_up' | 'declined' | 'blocked' | 'saved' | 'hung_up_fast';
+
+export interface DialerObservationRow {
+  obs_id:      string;
+  observer_id: string;
+  phone_hash:  string;
+  outcome:     DialerOutcome;
+  duration_s:  number | null;
+  observed_at: Date;
+}
+
+// ─── Presence ─────────────────────────────────────────────────────────────────
+
+export type PresenceStatus = 'online' | 'away' | 'offline';
+
+export interface UserPresence {
+  user_id:      string;
+  status:       PresenceStatus;
+  last_seen_at: Date | null;
+  status_text:  string | null;
+  status_emoji: string | null;
+}
+
+/** Derive presence tier from last_seen_at (computed at query time). */
+export function derivePresence(lastSeenAt: Date | null): PresenceStatus {
+  if (!lastSeenAt) return 'offline';
+  const diffMs = Date.now() - new Date(lastSeenAt).getTime();
+  if (diffMs < 3 * 60 * 1_000)  return 'online';
+  if (diffMs < 30 * 60 * 1_000) return 'away';
+  return 'offline';
+}
+
+// ─── Call quality ─────────────────────────────────────────────────────────────
+
+export interface CallQualityReport {
+  report_id:       string;
+  call_id:         string;
+  user_id:         string;
+  mos_score:       number | null;   // Mean Opinion Score 1.0–5.0
+  packet_loss_pct: number | null;
+  jitter_ms:       number | null;
+  rtt_ms:          number | null;
+  created_at:      Date;
 }
 
 // ─── API Response shapes ──────────────────────────────────────────────────────

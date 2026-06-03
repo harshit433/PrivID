@@ -648,7 +648,7 @@ trustRouter.post('/verify/liveness/complete', requireAuth, async (req: Request, 
       if (buf.length < 1024) throw new AppError(400, 'IMAGE_INVALID', 'The captured selfie was empty. Please try again.');
 
       const result = await checkLiveness(buf).catch((err: Error) => {
-        logger.error('liveness', 'Luxand check failed:', err.message);
+        logger.error('liveness', 'Luxand check failed', { error: err.message });
         throw new AppError(
           502,
           'LIVENESS_CHECK_FAILED',

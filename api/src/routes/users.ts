@@ -1,7 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { z } from 'zod';
-import { query, queryOne, withTransaction } from '@trustroute/shared';
+import { query, queryOne, withTransaction, derivePresence } from '@trustroute/shared';
 import type { UserRow } from '@trustroute/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
@@ -105,30 +105,120 @@ usersRouter.patch('/me', requireAuth, async (req: Request, res: Response, next: 
   }
 });
 
-// ─── GET /users/search?q= ─────────────────────────────────────────────────────
+// ─── GET /users/search ───────────────────────────────────────────────────────
+//
+// Privacy-aware user search.
+//
+// Parameters:
+//   q      (required) — search string, min 2 chars
+//   limit  (optional) — results per page, 1–50, default 20
+//   cursor (optional) — handle to paginate from (last handle of previous page)
+//
+// Visibility rules:
+//   • Always returns the requester's own profile (for self-lookup UX).
+//   • Returns discovery_mode = 'public' users.
+//   • Returns private-mode users the requester is already connected to.
+//   • Never returns blocked contacts.
+//   • Excludes the requester themselves.
+//
+// Search strategy (uses pg_trgm GiST indexes from migration 012):
+//   1. Exact handle prefix (fastest, most relevant)
+//   2. Trigram similarity on display_name
+//   3. Substring match on handle as a fallback
+//
+// Response omits sensitive fields (phone, email, exact trust_score number).
+// Returns `is_verified` (bool) so the client can show a checkmark.
+
+const searchSchema = z.object({
+  q:      z.string().min(2, 'Query must be at least 2 characters').max(60),
+  limit:  z.coerce.number().int().min(1).max(50).default(20),
+  cursor: z.string().optional(), // last handle from previous page
+});
 
 usersRouter.get('/search', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const q = z.string().min(2).parse(req.query.q);
-    const users = await query<Partial<UserRow>>(
-      `SELECT u.user_id, u.handle, u.display_name, u.trust_tier, u.trust_score
+    const { q, limit, cursor } = searchSchema.parse(req.query);
+    const myId = req.user!.sub;
+
+    // Sanitise the query: strip SQL wildcards, normalise whitespace
+    const qClean   = q.trim().replace(/[%_]/g, '\\$&').toLowerCase();
+    const qPrefix  = qClean + '%';   // for handle prefix match
+    const qTrigram = qClean;         // for display_name similarity
+
+    const rows = await query<{
+      user_id:      string;
+      handle:       string;
+      display_name: string | null;
+      avatar_url:   string | null;
+      trust_tier:   string;
+      profession:   string | null;
+      is_verified:  boolean;
+      connection_type: string | null;
+    }>(
+      `SELECT
+         u.user_id,
+         u.handle,
+         u.display_name,
+         u.avatar_url,
+         u.trust_tier,
+         u.profession,
+         -- is_verified: true if liveness_check is completed (minimum real-person bar)
+         EXISTS (
+           SELECT 1 FROM trust_factors tf
+           WHERE tf.user_id = u.user_id
+             AND tf.factor_type = 'liveness_check'
+             AND tf.status = 'completed'
+             AND tf.is_latest = TRUE
+         ) AS is_verified,
+         -- requester's connection type to this user (for UI affordances)
+         (SELECT connection_type FROM connections
+          WHERE owner_id = $1 AND contact_id = u.user_id) AS connection_type
        FROM users u
-       WHERE (u.handle ILIKE $1 OR u.display_name ILIKE $1)
-         AND u.user_id != $2
+       WHERE u.user_id != $1
          AND u.is_active = TRUE
+         -- Cursor-based pagination (handle is unique and alphabetically ordered)
+         AND ($5::text IS NULL OR u.handle > $5)
+         -- Visibility: public, or already connected (in either direction), but not blocked
          AND (
            u.discovery_mode = 'public'
            OR EXISTS (
              SELECT 1 FROM connections c
-             WHERE c.owner_id = $2 AND c.contact_id = u.user_id
+             WHERE c.owner_id = $1
+               AND c.contact_id = u.user_id
+               AND c.connection_type != 'blocked'
            )
          )
-       LIMIT 20`,
-      [`%${q}%`, req.user!.sub]
+         -- Search predicate: handle prefix OR fuzzy name match OR handle substring
+         AND (
+           u.handle ILIKE $2
+           OR (u.display_name IS NOT NULL AND similarity(u.display_name, $3) > 0.25)
+           OR u.handle ILIKE '%' || $3 || '%'
+         )
+       ORDER BY
+         -- Rank: exact handle prefix > everything else; then alphabetical
+         CASE WHEN u.handle ILIKE $2 THEN 0 ELSE 1 END ASC,
+         u.handle ASC
+       LIMIT $4`,
+      [myId, qPrefix, qTrigram, limit + 1, cursor ?? null],
     );
-    res.json({ ok: true, data: users });
+
+    // Determine if there's a next page (we fetched limit+1 rows)
+    const hasMore  = rows.length > limit;
+    const results  = hasMore ? rows.slice(0, limit) : rows;
+    const nextCursor = hasMore ? results[results.length - 1].handle : null;
+
+    res.json({
+      ok: true,
+      data: {
+        results,
+        next_cursor: nextCursor,
+        has_more:    hasMore,
+      },
+    });
   } catch (err) {
-    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', 'Query must be at least 2 characters.'));
+    if (err instanceof z.ZodError) {
+      return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    }
     next(err);
   }
 });
@@ -321,26 +411,118 @@ usersRouter.post('/me/avatar/upload-url', requireAuth, async (req: Request, res:
   }
 });
 
-// ─── GET /users/:handle ───────────────────────────────────────────────────────
+// ─── GET /users/:handle — Public profile ─────────────────────────────────────
+//
+// Returns the public-facing profile for a user identified by their handle.
+//
+// Visibility rules (same as /search):
+//   • Always accessible for the user's own profile.
+//   • If discovery_mode = 'public': accessible by any authenticated TrustRoute user.
+//   • If discovery_mode = 'private': only accessible to users who are already
+//     connected (in either direction, any type except blocked).
+//   • Returns 404 for private-mode profiles the requester cannot see — we do NOT
+//     reveal that the account exists, to avoid enumeration.
+//
+// The response deliberately omits phone_e164, email, and the exact trust_score
+// number to protect user privacy. The tier label and is_verified flag are
+// sufficient for UI trust indicators.
 
 usersRouter.get('/:handle', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const user = await queryOne<Partial<UserRow>>(
-      `SELECT user_id, handle, display_name, avatar_url, trust_tier, trust_score
-       FROM users WHERE handle = $1 AND is_active = TRUE`,
-      [req.params.handle]
-    );
-    if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'User not found.');
+    const handle = req.params.handle?.toLowerCase().trim();
+    if (!handle || handle.length < 3) {
+      throw new AppError(400, 'INVALID_HANDLE', 'Invalid handle.');
+    }
 
-    // Check connection status from both directions
-    const connection = await queryOne(
-      `SELECT connection_type FROM connections WHERE owner_id = $1 AND contact_id = $2`,
-      [req.user!.sub, user.user_id]
+    const myId = req.user!.sub;
+
+    const user = await queryOne<{
+      user_id:      string;
+      handle:       string;
+      display_name: string | null;
+      avatar_url:   string | null;
+      trust_tier:   string;
+      profession:   string | null;
+      bio:          string | null;
+      discovery_mode: string;
+      is_active:    boolean;
+      is_verified:  boolean;
+      created_at:   Date;
+    }>(
+      `SELECT
+         u.user_id,
+         u.handle,
+         u.display_name,
+         u.avatar_url,
+         u.trust_tier,
+         u.profession,
+         u.bio,
+         u.discovery_mode,
+         u.is_active,
+         u.created_at,
+         EXISTS (
+           SELECT 1 FROM trust_factors tf
+           WHERE tf.user_id = u.user_id
+             AND tf.factor_type = 'liveness_check'
+             AND tf.status = 'completed'
+             AND tf.is_latest = TRUE
+         ) AS is_verified
+       FROM users u
+       WHERE u.handle = $1`,
+      [handle],
     );
+
+    // 404 if user doesn't exist or is deactivated
+    if (!user || !user.is_active) {
+      throw new AppError(404, 'USER_NOT_FOUND', 'User not found.');
+    }
+
+    // Own profile: always visible
+    const isSelf = user.user_id === myId;
+
+    if (!isSelf && user.discovery_mode === 'private') {
+      // Check if the requester has any non-blocked connection to this user
+      const connection = await queryOne<{ connection_type: string }>(
+        `SELECT connection_type FROM connections
+          WHERE owner_id = $1 AND contact_id = $2`,
+        [myId, user.user_id],
+      );
+
+      const isConnected = connection && connection.connection_type !== 'blocked';
+      if (!isConnected) {
+        // Intentional 404 — do not reveal that a private account exists
+        throw new AppError(404, 'USER_NOT_FOUND', 'User not found.');
+      }
+    }
+
+    // Fetch the requester's connection state to this user (for client UI)
+    const [myConn, reverseConn] = await Promise.all([
+      queryOne<{ connection_type: string; temporary_expires_at: Date | null }>(
+        `SELECT connection_type, temporary_expires_at
+           FROM connections
+          WHERE owner_id = $1 AND contact_id = $2`,
+        [myId, user.user_id],
+      ),
+      queryOne<{ connection_type: string }>(
+        `SELECT connection_type
+           FROM connections
+          WHERE owner_id = $1 AND contact_id = $2`,
+        [user.user_id, myId],
+      ),
+    ]);
+
+    // Strip internal fields from the response
+    const { discovery_mode: _dm, is_active: _ia, ...publicFields } = user;
 
     res.json({
       ok: true,
-      data: { ...user, connection_type: connection?.connection_type ?? null },
+      data: {
+        ...publicFields,
+        // Requester's view of the relationship
+        my_connection_type:      myConn?.connection_type ?? 'unknown',
+        temporary_expires_at:    myConn?.temporary_expires_at ?? null,
+        their_connection_type:   reverseConn?.connection_type ?? 'unknown',
+      },
     });
   } catch (err) {
     next(err);
@@ -364,6 +546,126 @@ usersRouter.put('/me/push-token', requireAuth, async (req: Request, res: Respons
     res.json({ ok: true });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
+// ─── PATCH /users/me/status ───────────────────────────────────────────────────
+//
+// Set the user's visible status line (like WhatsApp "About" but ephemeral).
+// Both fields are optional — omitting a field keeps the existing value;
+// passing null explicitly clears it.
+
+const statusSchema = z.object({
+  status_text:  z.string().max(140).nullable().optional(),
+  status_emoji: z.string().max(8).nullable().optional(),
+}).refine(
+  (d) => d.status_text !== undefined || d.status_emoji !== undefined,
+  { message: 'Provide at least one of status_text or status_emoji.' },
+);
+
+usersRouter.patch('/me/status', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = statusSchema.parse(req.body);
+    const myId = req.user!.sub;
+
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    let i = 1;
+
+    if (body.status_text !== undefined) {
+      sets.push(`status_text = $${i++}`);
+      params.push(body.status_text);
+    }
+    if (body.status_emoji !== undefined) {
+      sets.push(`status_emoji = $${i++}`);
+      params.push(body.status_emoji);
+    }
+
+    sets.push('updated_at = NOW()');
+    params.push(myId);
+
+    await query(
+      `UPDATE users SET ${sets.join(', ')} WHERE user_id = $${i}`,
+      params,
+    );
+
+    res.json({ ok: true });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
+// ─── GET /users/:id/presence ──────────────────────────────────────────────────
+//
+// Returns real-time presence for a user identified by their UUID.
+// Separate from the profile endpoint so callers can poll this at a higher
+// frequency without fetching the full profile each time.
+//
+// Presence tiers (computed from last_seen_at):
+//   online  — last_seen_at within 3 min
+//   away    — last_seen_at within 30 min
+//   offline — last_seen_at > 30 min or null
+//
+// Uses /:id (UUID) rather than /:handle to avoid ambiguity with the
+// existing GET /:handle profile route.
+//
+// Access control: only returns presence if the requester is connected
+// to the target (or IS the target). Unknown strangers see offline only.
+
+usersRouter.get('/:id/presence', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    // Validate UUID format
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      throw new AppError(400, 'INVALID_ID', 'Must be a valid user UUID.');
+    }
+
+    const myId = req.user!.sub;
+
+    // Self-presence always allowed
+    const isSelf = id === myId;
+
+    if (!isSelf) {
+      // Only reveal presence to connected users (non-blocked)
+      const conn = await queryOne<{ connection_type: string }>(
+        `SELECT connection_type FROM connections
+          WHERE owner_id = $1 AND contact_id = $2`,
+        [myId, id],
+      );
+      if (!conn || conn.connection_type === 'blocked') {
+        // Return offline without revealing whether the user exists
+        return res.json({
+          ok: true,
+          data: { user_id: id, status: 'offline', last_seen_at: null, status_text: null, status_emoji: null },
+        });
+      }
+    }
+
+    const user = await queryOne<{
+      user_id:      string;
+      last_seen_at: Date | null;
+      status_text:  string | null;
+      status_emoji: string | null;
+    }>(
+      `SELECT user_id, last_seen_at, status_text, status_emoji FROM users WHERE user_id = $1`,
+      [id],
+    );
+
+    if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'User not found.');
+
+    res.json({
+      ok: true,
+      data: {
+        user_id:      user.user_id,
+        status:       derivePresence(user.last_seen_at),
+        last_seen_at: user.last_seen_at,
+        status_text:  user.status_text,
+        status_emoji: user.status_emoji,
+      },
+    });
+  } catch (err) {
     next(err);
   }
 });

@@ -1,15 +1,28 @@
+/**
+ * api/src/middleware/auth.ts
+ *
+ * JWT verification + presence heartbeat.
+ *
+ * On every authenticated request we fire a non-blocking last_seen_at update
+ * throttled to at most one PostgreSQL write per 2 minutes per user (via Redis
+ * SETNX). The actual DB write is fire-and-forget: it never delays the response.
+ *
+ * Presence key shape: presence:{user_id}  TTL: 120 s  Value: '1'
+ */
+
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import fs from 'fs';
 import path from 'path';
-import { AccessTokenPayload } from '@trustroute/shared';
+import { AccessTokenPayload, getRedis, query, keys } from '@trustroute/shared';
 import { AppError } from './errorHandler';
+
+// ─── JWT key loading ──────────────────────────────────────────────────────────
 
 let publicKey: string | null = null;
 
 function getPublicKey(): string {
   if (!publicKey) {
-    // Prefer base64-encoded env var (Railway/cloud) over file path
     if (process.env.JWT_PUBLIC_KEY_B64) {
       publicKey = Buffer.from(process.env.JWT_PUBLIC_KEY_B64, 'base64').toString('utf8');
     } else {
@@ -20,6 +33,8 @@ function getPublicKey(): string {
   return publicKey;
 }
 
+// ─── Type augmentation ────────────────────────────────────────────────────────
+
 declare global {
   namespace Express {
     interface Request {
@@ -27,6 +42,40 @@ declare global {
     }
   }
 }
+
+// ─── Presence heartbeat (non-blocking) ───────────────────────────────────────
+
+/**
+ * Update last_seen_at in PostgreSQL at most once every 2 minutes per user.
+ *
+ * Uses Redis SETNX as a cheap gate:
+ *   • If key is absent (NX):  write to DB, set key with 120 s TTL.
+ *   • If key exists:          DB was recently updated; skip.
+ *
+ * Errors are swallowed — presence is best-effort and must never break a request.
+ */
+function touchPresence(userId: string): void {
+  const presenceKey = keys.presence(userId);
+
+  setImmediate(async () => {
+    try {
+      const redis = getRedis();
+      // SET … NX EX: atomic "set-if-not-exists with expiry"
+      const set = await redis.set(presenceKey, '1', 'EX', 120, 'NX');
+      if (set === 'OK') {
+        // Throttle gate opened → write to PostgreSQL
+        await query(
+          `UPDATE users SET last_seen_at = NOW() WHERE user_id = $1`,
+          [userId],
+        );
+      }
+    } catch {
+      // Presence is best-effort; ignore all errors silently.
+    }
+  });
+}
+
+// ─── Middleware ───────────────────────────────────────────────────────────────
 
 export function requireAuth(req: Request, _res: Response, next: NextFunction) {
   const header = req.headers.authorization;
@@ -39,7 +88,12 @@ export function requireAuth(req: Request, _res: Response, next: NextFunction) {
     const payload = jwt.verify(token, getPublicKey(), {
       algorithms: ['RS256'],
     }) as AccessTokenPayload;
+
     req.user = payload;
+
+    // Async presence update — fire-and-forget, never awaited
+    touchPresence(payload.sub);
+
     next();
   } catch (err) {
     if (err instanceof jwt.TokenExpiredError) {
@@ -47,4 +101,22 @@ export function requireAuth(req: Request, _res: Response, next: NextFunction) {
     }
     return next(new AppError(401, 'INVALID_TOKEN', 'Invalid access token.'));
   }
+}
+
+/**
+ * requireAdmin — verifies a shared secret from the x-admin-key header.
+ * Used for internal admin endpoints (ML feedback, review resolution).
+ * NOT a user-facing route — never returns JWT-specific errors.
+ */
+export function requireAdmin(req: Request, _res: Response, next: NextFunction) {
+  const key = req.headers['x-admin-key'];
+  const adminKey = process.env.ADMIN_API_KEY;
+
+  if (!adminKey) {
+    return next(new AppError(503, 'ADMIN_NOT_CONFIGURED', 'Admin key not configured.'));
+  }
+  if (!key || key !== adminKey) {
+    return next(new AppError(401, 'UNAUTHORIZED', 'Admin access required.'));
+  }
+  next();
 }

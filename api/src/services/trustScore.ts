@@ -35,63 +35,21 @@
  */
 
 import { query, queryOne, withTransaction } from '@trustroute/shared';
+import {
+  computeVerificationPoints,
+  scoreToTier,
+  clampScore,
+  VERIFICATION_WEIGHTS,
+  TIER_THRESHOLDS,
+  REVIEW_THRESHOLD,
+} from '@trustroute/shared';
 import type { TrustTier, UserRow } from '@trustroute/shared';
 import { extractFeatures } from './featureStore';
 import { mlScoreUser, mlBatchScore } from './mlClient';
 import type { UserFeatures } from './featureStore';
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-export const VERIFICATION_WEIGHTS: Record<string, number> = {
-  phone_verified:   15,
-  device_integrity: 10,
-  liveness_check:   25,
-  govt_id_verified: 30,
-  profile_complete:  5,
-  account_age:       5,
-};
-
-export const TIER_THRESHOLDS: { tier: TrustTier; min: number }[] = [
-  { tier: 'premium',   min: 80 },
-  { tier: 'verified',  min: 50 },
-  { tier: 'basic',     min: 30 },
-  { tier: 'anonymous', min: 0  },
-];
-
-export const REVIEW_THRESHOLD = 20;
-
-export function scoreToTier(score: number): TrustTier {
-  for (const { tier, min } of TIER_THRESHOLDS) {
-    if (score >= min) return tier;
-  }
-  return 'anonymous';
-}
-
-// ─── Verification factor helpers ──────────────────────────────────────────────
-
-async function getCompletedFactors(userId: string): Promise<Set<string>> {
-  const rows = await query(
-    `SELECT factor_type FROM trust_factors WHERE user_id = $1 AND status = 'completed'`,
-    [userId],
-  );
-  return new Set(rows.map((r) => r.factor_type));
-}
-
-async function getProfileCompleteness(userId: string): Promise<boolean> {
-  const user = await queryOne<UserRow>(
-    `SELECT display_name, avatar_url FROM users WHERE user_id = $1`,
-    [userId],
-  );
-  return !!(user?.display_name && user?.avatar_url);
-}
-
-async function getAccountAgeDays(userId: string): Promise<number> {
-  const row = await queryOne<{ days: number }>(
-    `SELECT EXTRACT(DAY FROM NOW() - created_at)::int AS days FROM users WHERE user_id = $1`,
-    [userId],
-  );
-  return row?.days ?? 0;
-}
+// Re-export constants for backward compat with any other imports
+export { VERIFICATION_WEIGHTS, TIER_THRESHOLDS, REVIEW_THRESHOLD, scoreToTier };
 
 // ─── Score breakdown types ─────────────────────────────────────────────────────
 
@@ -119,28 +77,16 @@ export interface TrustBreakdown {
 // ─── Core score computation ────────────────────────────────────────────────────
 
 export async function computeTrustScore(userId: string): Promise<TrustBreakdown> {
-  // Verification factors run in parallel with ML feature extraction
-  const [completed, profileDone, ageDays, userFeatures] = await Promise.all([
-    getCompletedFactors(userId),
-    getProfileCompleteness(userId),
-    getAccountAgeDays(userId),
+  // Verification points (shared, deterministic) + ML feature extraction in parallel
+  const [verif, userFeatures] = await Promise.all([
+    computeVerificationPoints(userId),
     extractFeatures(userId).catch(() => null),
   ]);
 
   const factors = {
-    phone_verified:   completed.has('phone_verified')   ? 15 : 0,
-    device_integrity: completed.has('device_integrity') ? 10 : 0,
-    liveness_check:   completed.has('liveness_check')   ? 25 : 0,
-    govt_id_verified: completed.has('govt_id_verified') ? 30 : 0,
-    profile_complete: profileDone ? 5 : 0,
-    account_age:      Math.min(5, Math.round((ageDays / 180) * 5)),
-    ml_modifier:      0,
+    ...verif.factors,
+    ml_modifier: 0,
   };
-
-  const verificationBase = (
-    factors.phone_verified + factors.device_integrity + factors.liveness_check +
-    factors.govt_id_verified + factors.profile_complete + factors.account_age
-  );
 
   // ── ML behavioral modifier (fail-open: 0 if service unavailable) ────────────
   let mlResult: TrustBreakdown['ml'] | undefined;
@@ -157,11 +103,11 @@ export async function computeTrustScore(userId: string): Promise<TrustBreakdown>
         override_review:    ml.override_review,
       };
     } catch {
-      // ML service down — verification-only score, no behavioral modifier
+      // ML service down — verification-only score, no behavioral modifier applied
     }
   }
 
-  const total = Math.max(0, Math.min(100, verificationBase + factors.ml_modifier));
+  const total = clampScore(verif.total + factors.ml_modifier);
   return { total, tier: scoreToTier(total), factors, ml: mlResult };
 }
 

@@ -6,14 +6,81 @@ import fs from 'fs';
 import path from 'path';
 import { z } from 'zod';
 import { query, queryOne, withTransaction, getRedis, keys } from '@trustroute/shared';
-import type { OtpSessionRow, UserRow, RefreshTokenRow } from '@trustroute/shared';
+import type { OtpSessionRow, UserRow, RefreshTokenRow, ShadowNumberRow } from '@trustroute/shared';
 import { AppError } from '../middleware/errorHandler';
 import { requireAuth } from '../middleware/auth';
 import { verifyMsg91AccessToken } from '../services/msg91';
 import { recomputeAndPersist } from '../services/trustScore';
 import { buildHandleCandidates } from '../utils/handles';
+import { logger } from '../utils/logger';
 
 export const authRouter = Router();
+
+// ─── Shadow reputation bootstrap ─────────────────────────────────────────────
+//
+// Called once when a new user completes registration. Checks whether their
+// phone number has a pre-existing shadow score (from crowd-sourced dialer data)
+// and, if significant, records it as a `shadow_reputation` trust_factor.
+//
+// Score mapping (shadow_score → delta applied to starting trust score):
+//   0–20  SPAM:       -20 (they start significantly below baseline)
+//  21–35  SUSPICIOUS: -10
+//  36–49  BELOW AVG:   -5
+//  50–64  NEUTRAL:      0 (no factor inserted)
+//  65–79  GOOD:        +3
+//  80–100 TRUSTED:     +7 (capped low to prevent gaming)
+//
+// A minimum of 5 observations is required before the shadow score diverges
+// from the neutral baseline of 50.
+
+async function applyShadowReputation(userId: string, phoneHash: string): Promise<void> {
+  const shadow = await queryOne<ShadowNumberRow>(
+    `SELECT shadow_score, observation_count, block_rate
+       FROM shadow_numbers
+      WHERE phone_hash = $1`,
+    [phoneHash],
+  );
+
+  if (!shadow || shadow.observation_count < 5) return; // insufficient data
+
+  let delta = 0;
+  const s = shadow.shadow_score;
+  if      (s <= 20) delta = -20;
+  else if (s <= 35) delta = -10;
+  else if (s <= 49) delta = -5;
+  else if (s >= 80) delta = 7;
+  else if (s >= 65) delta = 3;
+  // 50–64: neutral → no factor
+
+  if (delta === 0) return;
+
+  // Insert shadow_reputation trust factor (is_latest = TRUE, no conflict expected
+  // since this is a fresh registration)
+  await query(
+    `INSERT INTO trust_factors
+           (user_id, factor_type, status, score_delta, provider, metadata, verified_at, is_latest)
+     VALUES ($1, 'shadow_reputation', 'completed', $2, 'shadow_network', $3, NOW(), TRUE)
+     ON CONFLICT DO NOTHING`,
+    [
+      userId,
+      delta,
+      JSON.stringify({
+        shadow_score:      shadow.shadow_score,
+        observation_count: shadow.observation_count,
+        block_rate:        shadow.block_rate,
+      }),
+    ],
+  );
+
+  logger.info('auth/register', 'Applied shadow reputation factor', {
+    userId,
+    shadow_score: shadow.shadow_score,
+    delta,
+    observations: shadow.observation_count,
+  });
+}
+
+// ─── Trust factor helpers ─────────────────────────────────────────────────────
 
 async function markPhoneVerified(userId: string): Promise<void> {
   await query(
@@ -80,10 +147,16 @@ function hashToken(token: string): string {
 }
 
 function issueTokens(user: UserRow): { accessToken: string; refreshToken: string } {
+  // Cast options to any to handle StringValue type constraint in newer @types/jsonwebtoken.
+  // The values are valid JWT duration strings; the cast is intentional.
+  const jwtOptions: any = {
+    algorithm: 'RS256',
+    expiresIn: process.env.JWT_ACCESS_EXPIRES_IN ?? '24h',
+  };
   const accessToken = jwt.sign(
     { sub: user.user_id, handle: user.handle, tier: user.trust_tier },
     getPrivateKey(),
-    { algorithm: 'RS256', expiresIn: process.env.JWT_ACCESS_EXPIRES_IN ?? '24h' }
+    jwtOptions,
   );
   const refreshToken = crypto.randomBytes(40).toString('base64url');
   return { accessToken, refreshToken };
@@ -186,6 +259,15 @@ authRouter.post('/register/verify', async (req: Request, res: Response, next: Ne
       );
       return rows[0];
     });
+
+    // ── Shadow reputation bootstrap ───────────────────────────────────────────
+    // When a NEW user joins, check if their phone_hash has a shadow score from
+    // crowd-sourced dialer observations. Apply as a starting trust modifier so
+    // known spammers don't start from a neutral 50.
+    // Best-effort: errors here must never block registration.
+    applyShadowReputation(user.user_id, phone_hash).catch((e) =>
+      logger.warn('auth/register', 'Shadow reputation check failed (non-fatal)', { error: e.message })
+    );
 
     const { accessToken, refreshToken } = issueTokens(user);
     const refreshHash = hashToken(refreshToken);

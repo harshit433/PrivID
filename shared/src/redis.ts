@@ -77,4 +77,15 @@ export const keys = {
   simSmsChallenge: (userId: string) => `sim_sms:${userId}`,
   /** SIM SMS send counter — per user, only incremented after successful delivery. TTL 15 min. */
   rateLimitSimSms: (userId: string) => `ratelimit:sim_sms:${userId}`,
+  /**
+   * Presence heartbeat debounce — written with NX + 120 s TTL.
+   * If SET returns OK, the caller should also write last_seen_at to PostgreSQL.
+   * If SET returns null (key existed), the DB was updated recently; skip.
+   */
+  presence: (userId: string) => `presence:${userId}`,
+  /**
+   * Shadow score feedback cooldown — prevents the same user being submitted
+   * as an ML training label more than once per 7-day window.
+   */
+  mlFeedbackSent: (userId: string) => `ml:feedback:${userId}`,
 };

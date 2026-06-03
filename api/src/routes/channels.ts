@@ -1,7 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { query, queryOne } from '@trustroute/shared';
-import type { ReachabilityChannelRow } from '@trustroute/shared';
+import type { ReachabilityChannelRow, ReachabilityChannelPublic } from '@trustroute/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 
@@ -63,7 +63,7 @@ channelsRouter.get('/resolve/:token', async (req: Request, res: Response, next: 
        JOIN users u ON u.user_id = rc.owner_id
        WHERE rc.token = $1`,
       [req.params.token]
-    );
+    ) as ReachabilityChannelPublic | null;
 
     if (!channel) throw new AppError(404, 'CHANNEL_NOT_FOUND', 'Reachability link not found.');
     if (channel.status !== 'active') throw new AppError(410, 'CHANNEL_INACTIVE', 'This link is no longer active.');

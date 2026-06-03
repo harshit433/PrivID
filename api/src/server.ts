@@ -13,6 +13,8 @@ import { chatRouter } from './routes/chat';
 import { trustRouter } from './routes/trust';
 import { livenessRouter } from './routes/liveness';
 import { simulationRouter } from './routes/simulation';
+import { numbersRouter } from './routes/numbers';
+import { adminRouter } from './routes/admin';
 import { errorHandler } from './middleware/errorHandler';
 import { apiLimiter, publicLimiter } from './middleware/rateLimit';
 import { getPool, connectRedis, getRedis } from '@trustroute/shared';
@@ -129,6 +131,10 @@ app.use('/trust', apiLimiter, trustRouter);
 // The liveness web page is loaded inside a WebView (no auth header / not a
 // per-user API call), so it is public and exempt from the API rate limiter.
 app.use('/liveness', livenessRouter);
+// Shadow trust: observe + query shadow scores for non-TrustRoute numbers
+app.use('/numbers', apiLimiter, numbersRouter);
+// Admin: internal-only, gated by x-admin-key (should be behind VPN in prod)
+app.use('/admin', adminRouter);
 if (process.env.NODE_ENV !== 'production') {
   app.use('/simulation', simulationRouter);
 }

@@ -163,3 +163,58 @@ export async function sendIncomingCallPush(
     logger.warn('FCM', `Push failed: ${err?.message}`);
   }
 }
+
+// ── FCM — Admin / account notifications ───────────────────────────────────────
+
+export type AdminNotificationType =
+  | 'review_cleared'
+  | 'warning'
+  | 'restriction'
+  | 'suspension';
+
+const ADMIN_PUSH_TITLES: Record<AdminNotificationType, string> = {
+  review_cleared: 'Account Update',
+  warning:        'Account Warning',
+  restriction:    'Account Restriction',
+  suspension:     'Account Suspended',
+};
+
+/**
+ * Send an account-status notification to a user via FCM.
+ *
+ * Uses a notification message (not data-only) so it appears in the system
+ * notification tray even when the app is backgrounded.
+ *
+ * Errors are swallowed — failed push must never block the admin action.
+ */
+export async function sendAdminNotification(
+  fcmToken: string,
+  type:     AdminNotificationType,
+  body:     string,
+): Promise<void> {
+  const app = getApp();
+  if (!app) return;
+
+  try {
+    await app.messaging().send({
+      token: fcmToken,
+      notification: {
+        title: ADMIN_PUSH_TITLES[type],
+        body,
+      },
+      data: {
+        type: `account_${type}`,
+      },
+      android: {
+        priority: 'high',
+        notification: { channelId: 'account_alerts' },
+      },
+      apns: {
+        payload: { aps: { badge: 1, sound: 'default' } },
+      },
+    });
+    logger.debug('FCM', `Admin notification sent: ${type}`);
+  } catch (err: any) {
+    logger.warn('FCM', `Admin notification push failed: ${err?.message}`);
+  }
+}

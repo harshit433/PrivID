@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { queryOne } from '@trustroute/shared';
 import type { ConnectionType } from '@trustroute/shared';
+import { logger } from '../utils/logger';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 import {
@@ -237,8 +238,8 @@ chatRouter.post('/webhook', async (req: Request, res: Response) => {
 
     return res.status(200).json({});
   } catch (err: any) {
-    console.warn('[chat] webhook error:', err?.message);
-    // Fail open — never block delivery on an internal error.
+    logger.warn('chat/webhook', 'Internal error — failing open', { error: err?.message });
+    // Fail open — never block delivery due to an internal error.
     return res.status(200).json({});
   }
 });

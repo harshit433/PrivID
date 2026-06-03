@@ -83,13 +83,61 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
       calleeId = body.callee_id!;
 
       // Block callers whose trust score has dropped below the review threshold
-      const callerStatus = await queryOne<{ is_under_review: boolean }>(
-        `SELECT is_under_review FROM users WHERE user_id = $1`,
+      // Also check call restriction (set by admin 'restrict' action)
+      const callerStatus = await queryOne<{
+        is_under_review:        boolean;
+        call_restriction_until: Date | null;
+      }>(
+        `SELECT is_under_review, call_restriction_until FROM users WHERE user_id = $1`,
         [callerId],
       );
+
       if (callerStatus?.is_under_review) {
         throw new AppError(403, 'ACCOUNT_UNDER_REVIEW',
           'Your account is under review. You cannot initiate new calls until the review is resolved.');
+      }
+
+      // Restriction check — only applies to non-trusted callees
+      // (Trusted contacts must always remain reachable regardless of restriction)
+      const restriction = callerStatus?.call_restriction_until;
+      if (restriction && new Date(restriction) > new Date()) {
+        // Check the caller's OWN connection to the callee (not the reverse)
+        const callerConn = await queryOne<{ connection_type: string }>(
+          `SELECT connection_type FROM connections WHERE owner_id = $1 AND contact_id = $2`,
+          [callerId, body.callee_id!],
+        );
+        const isTrustedByMe =
+          callerConn?.connection_type === 'trusted' ||
+          callerConn?.connection_type === 'temporary';
+
+        if (!isTrustedByMe) {
+          // Count non-trusted outgoing calls in the last 24 h under restriction
+          const RESTRICTION_DAILY_CAP = 5;
+          const [restrictedCallCount] = await query<{ count: string }>(
+            `SELECT COUNT(*)::text AS count
+               FROM calls c
+              WHERE c.caller_id = $1
+                AND c.created_at > NOW() - INTERVAL '1 day'
+                AND NOT EXISTS (
+                  SELECT 1 FROM connections cc
+                  WHERE cc.owner_id = c.caller_id
+                    AND cc.contact_id = c.callee_id
+                    AND cc.connection_type IN ('trusted','temporary')
+                )`,
+            [callerId],
+          );
+
+          if (parseInt(restrictedCallCount?.count ?? '0') >= RESTRICTION_DAILY_CAP) {
+            throw new AppError(
+              429,
+              'ACCOUNT_RESTRICTED',
+              `Your account is under a temporary restriction. ` +
+              `You can make up to ${RESTRICTION_DAILY_CAP} calls to new contacts per day. ` +
+              `Calls to your trusted contacts are unaffected. ` +
+              `Restriction lifts on ${new Date(restriction).toLocaleDateString('en-IN')}.`,
+            );
+          }
+        }
       }
 
       // Check caller's permission from callee's perspective
@@ -370,7 +418,7 @@ callsRouter.post('/:id/livekit-token', requireAuth, async (req: Request, res: Re
     });
     at.addGrant({
       roomJoin: true,
-      room: call.webrtc_room_id,
+      room: call.webrtc_room_id ?? undefined,
       canPublish: true,
       canSubscribe: true,
       canPublishData: true,
@@ -470,6 +518,77 @@ callsRouter.get('/:id', requireAuth, async (req: Request, res: Response, next: N
     if (!call) throw new AppError(404, 'CALL_NOT_FOUND', 'Call not found.');
     res.json({ ok: true, data: call });
   } catch (err) {
+    next(err);
+  }
+});
+
+// ─── POST /calls/:id/quality ──────────────────────────────────────────────────
+//
+// Submit a quality report for a completed call.
+//
+// The data feeds the ML pipeline:
+//   • Very short avg_duration or high packet_loss correlates with robocall spam.
+//   • High MOS scores for a user's calls contribute positively to their
+//     behavioural feature vector (calls_avg_quality).
+//
+// Constraints:
+//   • Caller or callee only — no third-party reports.
+//   • Call must be in a terminal state (ended | missed | declined).
+//   • One report per (call_id, user_id) — duplicate submissions are rejected.
+//   • All metric fields are optional; submitting an empty object is allowed
+//     (records that the report was submitted but no metrics were available).
+
+const qualitySchema = z.object({
+  mos_score:       z.number().min(1.0).max(5.0).optional(),
+  packet_loss_pct: z.number().min(0).max(100).optional(),
+  jitter_ms:       z.number().int().min(0).optional(),
+  rtt_ms:          z.number().int().min(0).optional(),
+});
+
+callsRouter.post('/:id/quality', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    const metrics = qualitySchema.parse(req.body);
+    const myId    = req.user!.sub;
+
+    // Verify the call exists and the requester was a participant
+    const call = await queryOne<{ caller_id: string; callee_id: string; status: string }>(
+      `SELECT caller_id, callee_id, status FROM calls WHERE call_id = $1`,
+      [id],
+    );
+
+    if (!call) throw new AppError(404, 'CALL_NOT_FOUND', 'Call not found.');
+
+    if (call.caller_id !== myId && call.callee_id !== myId) {
+      throw new AppError(403, 'FORBIDDEN', 'You were not a participant in this call.');
+    }
+
+    // Only accept reports for calls that have ended
+    const terminalStatuses = ['ended', 'missed', 'declined', 'failed'];
+    if (!terminalStatuses.includes(call.status)) {
+      throw new AppError(409, 'CALL_NOT_ENDED', 'Quality reports are only accepted after a call ends.');
+    }
+
+    // One report per participant per call — duplicate = 409
+    const existing = await queryOne(
+      `SELECT report_id FROM call_quality_reports WHERE call_id = $1 AND user_id = $2`,
+      [id, myId],
+    );
+    if (existing) {
+      throw new AppError(409, 'ALREADY_SUBMITTED', 'Quality report already submitted for this call.');
+    }
+
+    const [report] = await query<{ report_id: string }>(
+      `INSERT INTO call_quality_reports (call_id, user_id, mos_score, packet_loss_pct, jitter_ms, rtt_ms)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING report_id`,
+      [id, myId, metrics.mos_score ?? null, metrics.packet_loss_pct ?? null,
+       metrics.jitter_ms ?? null, metrics.rtt_ms ?? null],
+    );
+
+    res.status(201).json({ ok: true, data: { report_id: report.report_id } });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
     next(err);
   }
 });

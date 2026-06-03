@@ -111,7 +111,7 @@ export async function verifyAndroidIntegrityToken(token: string): Promise<boolea
     return deviceOk && appOk;
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    logger.error('playIntegrity', 'decodeIntegrityToken failed:', message);
+    logger.error('playIntegrity', 'decodeIntegrityToken failed', { error: message });
     return false;
   }
 }

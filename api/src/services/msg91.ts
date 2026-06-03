@@ -244,7 +244,7 @@ export async function sendSimVerificationSms(
     }
 
     const msg = parseMsg91Error(err);
-    logger.error('msg91', 'SIM SMS send failed:', msg);
+    logger.error('msg91', 'SIM SMS send failed', { error: msg });
     throw codedError(msg, 'SIM_SMS_SEND_FAILED');
   }
 }

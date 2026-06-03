@@ -6,6 +6,7 @@ import { AppError } from '../middleware/errorHandler';
 import {
   deleteStatusMediaByUrl,
   generateStatusUploadUrl,
+  resolveStatusMediaUrl,
   uploadStatusImageBuffer,
 } from '../services/s3';
 import {
@@ -28,17 +29,21 @@ type StatusRow = {
   expires_at: string;
 };
 
-function mapItem(row: StatusRow) {
+async function mapItem(row: StatusRow) {
   return {
     status_id: row.status_id,
     type: row.type,
     text_body: row.text_body,
-    media_url: row.media_url,
+    media_url: await resolveStatusMediaUrl(row.media_url),
     media_content_type: row.media_content_type,
     duration_ms: row.duration_ms,
     created_at: row.created_at,
     expires_at: row.expires_at,
   };
+}
+
+async function mapItems(rows: StatusRow[]) {
+  return Promise.all(rows.map(mapItem));
 }
 
 async function canViewUserStatus(viewerId: string, ownerId: string): Promise<boolean> {
@@ -106,10 +111,12 @@ statusRouter.get('/feed', requireAuth, async (req: Request, res: Response, next:
       [userIds],
     );
 
-    const byUser = new Map<string, ReturnType<typeof mapItem>[]>();
-    for (const row of items) {
+    const mappedItems = await mapItems(items);
+    const byUser = new Map<string, Awaited<ReturnType<typeof mapItem>>[]>();
+    for (let i = 0; i < items.length; i++) {
+      const row = items[i];
       const list = byUser.get(row.user_id) ?? [];
-      list.push(mapItem(row));
+      list.push(mappedItems[i]);
       byUser.set(row.user_id, list);
     }
 
@@ -141,7 +148,7 @@ statusRouter.get('/me', requireAuth, async (req: Request, res: Response, next: N
        ORDER BY created_at ASC`,
       [req.user!.sub],
     );
-    res.json({ ok: true, data: rows.map(mapItem) });
+    res.json({ ok: true, data: await mapItems(rows) });
   } catch (err) {
     next(err);
   }
@@ -181,7 +188,7 @@ statusRouter.get('/users/:userId', requireAuth, async (req: Request, res: Respon
       data: {
         ...user,
         is_mine: ownerId === req.user!.sub,
-        items: rows.map(mapItem),
+        items: await mapItems(rows),
       },
     });
   } catch (err) {
@@ -273,7 +280,7 @@ statusRouter.post('/', requireAuth, async (req: Request, res: Response, next: Ne
       [userId, type, textBody, mediaUrl, mediaContentType, durationMs, String(STATUS_TTL_HOURS)],
     );
 
-    res.status(201).json({ ok: true, data: mapItem(row) });
+    res.status(201).json({ ok: true, data: await mapItem(row) });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
     if (err instanceof Error && /Unsupported|must be between/.test(err.message)) {

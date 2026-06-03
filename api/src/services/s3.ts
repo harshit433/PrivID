@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import {
   assertImageContentType,
@@ -7,6 +7,7 @@ import {
   isStatusS3Configured,
   publicUrlForKey,
   STATUS_MAX_IMAGE_BYTES,
+  STATUS_TTL_HOURS,
   statusBucket,
 } from './statusMedia';
 
@@ -131,16 +132,45 @@ export async function uploadStatusImageBuffer(
   return publicUrlForKey(key);
 }
 
+/** Extract S3 object key from a stored status media URL. */
+export function parseStatusObjectKey(mediaUrl: string): string | null {
+  if (!mediaUrl.startsWith('http')) return null;
+  const bucket = statusBucket();
+  const region = process.env.AWS_REGION!;
+  const virtualHosted = `https://${bucket}.s3.${region}.amazonaws.com/`;
+  if (mediaUrl.startsWith(virtualHosted)) {
+    return decodeURIComponent(mediaUrl.slice(virtualHosted.length).split('?')[0]);
+  }
+  const pathStyle = `https://s3.${region}.amazonaws.com/${bucket}/`;
+  if (mediaUrl.startsWith(pathStyle)) {
+    return decodeURIComponent(mediaUrl.slice(pathStyle.length).split('?')[0]);
+  }
+  return null;
+}
+
+/**
+ * Return a URL the mobile app can load. Private status buckets need presigned GET URLs.
+ */
+export async function resolveStatusMediaUrl(mediaUrl: string | null): Promise<string | null> {
+  if (!mediaUrl) return null;
+  if (mediaUrl.startsWith('data:')) return mediaUrl;
+  if (!isStatusS3Configured()) return mediaUrl;
+
+  const key = parseStatusObjectKey(mediaUrl);
+  if (!key?.startsWith('status/')) return mediaUrl;
+
+  const command = new GetObjectCommand({ Bucket: statusBucket(), Key: key });
+  return getSignedUrl(getS3Client(), command, {
+    expiresIn: STATUS_TTL_HOURS * 3600,
+  });
+}
+
 export async function deleteStatusMediaByUrl(mediaUrl: string): Promise<void> {
   if (!isStatusS3Configured() || !mediaUrl.startsWith('http')) return;
   try {
-    const bucket = statusBucket();
-    const region = process.env.AWS_REGION!;
-    const base = `https://${bucket}.s3.${region}.amazonaws.com/`;
-    if (!mediaUrl.startsWith(base)) return;
-    const key = mediaUrl.slice(base.length).split('?')[0];
-    if (!key.startsWith('status/')) return;
-    await getS3Client().send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+    const key = parseStatusObjectKey(mediaUrl);
+    if (!key?.startsWith('status/')) return;
+    await getS3Client().send(new DeleteObjectCommand({ Bucket: statusBucket(), Key: key }));
   } catch (err) {
     console.warn('[S3] Status media delete failed:', (err as Error).message);
   }

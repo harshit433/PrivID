@@ -189,7 +189,10 @@ export async function verifyAndroidIntegrityToken(
   }
 
   if (process.env.NODE_ENV === 'production' && !isPlayIntegrityConfigured()) {
-    logger.error('playIntegrity', 'Production requires GOOGLE_PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON');
+    logger.error(
+      'playIntegrity',
+      'Production requires FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON with Play Integrity access',
+    );
     return { ok: false, reason: 'NOT_CONFIGURED' };
   }
 

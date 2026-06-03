@@ -18,7 +18,12 @@ import { statusRouter } from './routes/status';
 import { subscriptionsRouter } from './routes/subscriptions';
 import { businessRegisterRouter } from './routes/businessRegister';
 import { adminRouter } from './routes/admin';
-import { mountBusinessSuite } from './mountBusinessSuite';
+import {
+  mountBusinessSuite,
+  routeByApiKey,
+  businessChannelsRouter,
+  businessSubscriptionsRouter,
+} from './mountBusinessSuite';
 import { errorHandler } from './middleware/errorHandler';
 import { apiLimiter, publicLimiter } from './middleware/rateLimit';
 import { getPool, connectRedis, getRedis } from '@trustroute/shared';
@@ -125,9 +130,13 @@ app.use('/auth', publicLimiter, authRouter);
 app.use('/users', apiLimiter, usersRouter);
 app.use('/connections', apiLimiter, connectionsRouter);
 app.use('/status', apiLimiter, statusRouter);
-app.use('/subscriptions', apiLimiter, subscriptionsRouter);
+app.use(
+  '/subscriptions',
+  apiLimiter,
+  routeByApiKey(businessSubscriptionsRouter, subscriptionsRouter),
+);
 app.use('/calls', apiLimiter, callsRouter);
-app.use('/channels', apiLimiter, channelsRouter);
+app.use('/channels', apiLimiter, routeByApiKey(businessChannelsRouter, channelsRouter));
 // Stream calls /chat/webhook server-to-server (no user) — exempt it from the
 // per-user limiter; all other /chat routes are authenticated + rate limited.
 app.use('/chat', (req, res, next) => {

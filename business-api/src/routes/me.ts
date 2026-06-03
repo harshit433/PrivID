@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { query, queryOne, PLAN_LIMITS } from '@trustroute/shared';
+import { query, queryOne, PLAN_LIMITS, generateApiKey } from '@trustroute/shared';
 import { requireApiKey } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 
@@ -103,6 +103,35 @@ meRouter.patch('/', async (req: Request, res: Response, next: NextFunction) => {
     if (err instanceof z.ZodError) {
       return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
     }
+    next(err);
+  }
+});
+
+/** Rotate API key — returns new key once (verified businesses only). */
+meRouter.post('/api-key/rotate', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const biz = await queryOne<{ status: string }>(
+      `SELECT status::text AS status FROM businesses WHERE business_id = $1`,
+      [req.business!.business_id],
+    );
+    if (!biz || biz.status !== 'verified') {
+      throw new AppError(403, 'NOT_VERIFIED', 'Only verified businesses can rotate API keys.');
+    }
+
+    const { rawKey, keyHash } = generateApiKey();
+    await query(
+      `UPDATE businesses SET api_key_hash = $1, updated_at = NOW() WHERE business_id = $2`,
+      [keyHash, req.business!.business_id],
+    );
+
+    res.json({
+      ok: true,
+      data: {
+        api_key: rawKey,
+        message: 'Store this key securely. It will not be shown again.',
+      },
+    });
+  } catch (err) {
     next(err);
   }
 });

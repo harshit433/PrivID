@@ -21,6 +21,7 @@ export const tokenRotationQueue     = new Queue('token-rotation',    { connectio
 export const shadowRecomputeQueue   = new Queue('shadow-recompute',  { connection: getBullRedis() });
 export const mlFeedbackQueue        = new Queue('ml-feedback',       { connection: getBullRedis() });
 export const statusExpiryQueue      = new Queue('status-expiry',     { connection: getBullRedis() });
+export const businessMessageDeliverQueue = new Queue('business-message-deliver', { connection: getBullRedis() });
 
 // ─── Job data interfaces ──────────────────────────────────────────────────────
 
@@ -55,4 +56,8 @@ export interface MLFeedbackJob {
 
 export interface StatusExpiryJob {
   // No payload — purges all expired status updates
+}
+
+export interface BusinessMessageDeliverJob {
+  message_id: string;
 }

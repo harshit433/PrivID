@@ -88,4 +88,8 @@ export const keys = {
    * as an ML training label more than once per 7-day window.
    */
   mlFeedbackSent: (userId: string) => `ml:feedback:${userId}`,
+  /** Single-use business QR scan token → user_id. TTL 60s. */
+  bizQr: (token: string) => `biz_qr:${token}`,
+  /** Business API rate limit bucket per verified business. */
+  bizApiRate: (businessId: string) => `ratelimit:biz_api:${businessId}`,
 };

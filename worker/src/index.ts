@@ -31,6 +31,10 @@ import { startTokenRotationWorker, enqueueTokenRotation } from './jobs/tokenRota
 import { startShadowScoreRecomputeWorker, enqueueShadowRecompute } from './jobs/shadowScoreRecompute';
 import { startMLFeedbackWorker, enqueueMLFeedbackScan } from './jobs/mlFeedback';
 import { startStatusExpiryWorker, enqueueStatusExpiryScan } from './jobs/statusExpiry';
+import {
+  startBusinessMessageDeliverWorker,
+  enqueueDueScheduledBusinessMessages,
+} from './jobs/businessMessageDeliver';
 import { isMLAvailable } from './utils/mlClient';
 import { logger } from './utils/logger';
 
@@ -56,6 +60,7 @@ async function main() {
     startShadowScoreRecomputeWorker(),
     startMLFeedbackWorker(),
     startStatusExpiryWorker(),
+    startBusinessMessageDeliverWorker(),
   ];
 
   logger.info(WORKER, `${workers.length} workers running`);
@@ -67,6 +72,7 @@ async function main() {
     enqueueTokenRotation(),
     enqueueMLFeedbackScan(),
     enqueueStatusExpiryScan(),
+    enqueueDueScheduledBusinessMessages(),
   ]);
 
   // ── Cron ticks ───────────────────────────────────────────────────────────
@@ -83,6 +89,7 @@ async function main() {
   cron('channel-expiry scan',     enqueueChannelExpiryScan,     5  * 60 * 1_000);
   cron('connection-expiry scan',  enqueueConnectionExpiryScan,  10 * 60 * 1_000);
   cron('status-expiry scan',      enqueueStatusExpiryScan,      5  * 60 * 1_000);
+  cron('business scheduled msgs', enqueueDueScheduledBusinessMessages, 60 * 1_000);
   cron('ml-feedback scan',        enqueueMLFeedbackScan,        6  * 60 * 60 * 1_000);
   cron('token cleanup',           enqueueTokenRotation,         24 * 60 * 60 * 1_000);
 

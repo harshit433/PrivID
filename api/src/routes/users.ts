@@ -6,6 +6,7 @@ import type { UserRow } from '@trustroute/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 import { generateAvatarUploadUrl, uploadAvatarBuffer } from '../services/s3';
+import { issueBusinessQrToken } from '../services/businessQr';
 
 export const usersRouter = Router();
 
@@ -356,6 +357,19 @@ usersRouter.post('/lookup-by-phones', requireAuth, async (req: Request, res: Res
     res.json({ ok: true, data: found.map(({ phone_hash: _ph, ...u }) => u) });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
+// ─── GET /users/me/business-qr ─────────────────────────────────────────────────
+//
+// Rotating 60s token for Business Suite QR scan (single-use on scan).
+
+usersRouter.get('/me/business-qr', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const data = await issueBusinessQrToken(req.user!.sub);
+    res.json({ ok: true, data });
+  } catch (err) {
     next(err);
   }
 });

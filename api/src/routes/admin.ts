@@ -44,7 +44,7 @@
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { query, queryOne, withTransaction } from '@trustroute/shared';
+import { query, queryOne, withTransaction, generateApiKey } from '@trustroute/shared';
 import type { UserRow } from '@trustroute/shared';
 import { requireAdmin } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
@@ -892,6 +892,167 @@ adminRouter.post('/ml/retrain', async (_req: Request, res: Response, next: NextF
 adminRouter.get('/ml/status', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     res.json({ ok: true, data: await mlHealthCheck() });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Business Suite admin ─────────────────────────────────────────────────────
+
+adminRouter.get('/businesses/stats', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const row = await queryOne<{
+      total: string;
+      pending: string;
+      verified: string;
+      suspended: string;
+      starter: string;
+      growth: string;
+      enterprise: string;
+    }>(
+      `SELECT
+         COUNT(*)::text AS total,
+         COUNT(*) FILTER (WHERE status = 'pending')::text AS pending,
+         COUNT(*) FILTER (WHERE status = 'verified')::text AS verified,
+         COUNT(*) FILTER (WHERE status = 'suspended')::text AS suspended,
+         COUNT(*) FILTER (WHERE plan = 'starter')::text AS starter,
+         COUNT(*) FILTER (WHERE plan = 'growth')::text AS growth,
+         COUNT(*) FILTER (WHERE plan = 'enterprise')::text AS enterprise
+       FROM businesses`,
+    );
+    res.json({ ok: true, data: row });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get('/businesses', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const status = (req.query.status as string) || 'pending';
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '50'), 10) || 50));
+    const rows = await query(
+      `SELECT business_id, name, gstin, cin, category, contact_email, website,
+              status::text AS status, plan::text AS plan, created_at
+       FROM businesses
+       WHERE status = $1::business_status
+       ORDER BY created_at ASC
+       LIMIT $2`,
+      [status, limit],
+    );
+    res.json({ ok: true, data: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get('/businesses/:id', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const row = await queryOne(
+      `SELECT business_id, name, gstin, cin, category, contact_email, website, logo_url,
+              status::text AS status, plan::text AS plan, rejection_reason,
+              verified_at, suspended_at, created_at, updated_at
+       FROM businesses WHERE business_id = $1`,
+      [req.params.id],
+    );
+    if (!row) throw new AppError(404, 'NOT_FOUND', 'Business not found.');
+
+    const channels = await query(
+      `SELECT channel_id, name, channel_type::text AS channel_type, active, created_at
+       FROM business_channels WHERE business_id = $1`,
+      [req.params.id],
+    );
+
+    res.json({ ok: true, data: { ...row, channels } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const rejectBusinessSchema = z.object({
+  reason: z.string().min(3).max(500),
+});
+
+const approveBusinessSchema = z.object({
+  plan: z.enum(['starter', 'growth', 'enterprise']).optional(),
+});
+
+adminRouter.post('/businesses/:id/approve', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = approveBusinessSchema.parse(req.body ?? {});
+    const biz = await queryOne<{ business_id: string; status: string }>(
+      `SELECT business_id, status::text AS status FROM businesses WHERE business_id = $1`,
+      [req.params.id],
+    );
+    if (!biz) throw new AppError(404, 'NOT_FOUND', 'Business not found.');
+    if (biz.status !== 'pending') {
+      throw new AppError(409, 'NOT_PENDING', 'Only pending businesses can be approved.');
+    }
+
+    const { rawKey, keyHash } = generateApiKey();
+    const plan = body.plan ?? 'starter';
+
+    await query(
+      `UPDATE businesses
+       SET status = 'verified', api_key_hash = $1, plan = $2::business_plan,
+           verified_at = NOW(), rejection_reason = NULL, updated_at = NOW()
+       WHERE business_id = $3`,
+      [keyHash, plan, req.params.id],
+    );
+
+    await logAction(req.params.id, 'business_approved', null, { plan }, req.headers['x-admin-ref'] as string);
+
+    res.json({
+      ok: true,
+      data: {
+        business_id: req.params.id,
+        status: 'verified',
+        api_key: rawKey,
+        message: 'Store this API key securely — it will not be shown again.',
+      },
+    });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    }
+    next(err);
+  }
+});
+
+adminRouter.post('/businesses/:id/reject', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { reason } = rejectBusinessSchema.parse(req.body);
+    const [row] = await query(
+      `UPDATE businesses
+       SET status = 'rejected', rejection_reason = $1, updated_at = NOW()
+       WHERE business_id = $2 AND status = 'pending'
+       RETURNING business_id`,
+      [reason.trim(), req.params.id],
+    );
+    if (!row) throw new AppError(404, 'NOT_FOUND', 'Pending business not found.');
+
+    await logAction(req.params.id, 'business_rejected', reason, {}, req.headers['x-admin-ref'] as string);
+    res.json({ ok: true, data: { business_id: row.business_id, status: 'rejected' } });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    }
+    next(err);
+  }
+});
+
+adminRouter.post('/businesses/:id/suspend', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const [row] = await query(
+      `UPDATE businesses
+       SET status = 'suspended', suspended_at = NOW(), updated_at = NOW()
+       WHERE business_id = $1 AND status = 'verified'
+       RETURNING business_id`,
+      [req.params.id],
+    );
+    if (!row) throw new AppError(404, 'NOT_FOUND', 'Verified business not found.');
+
+    await logAction(req.params.id, 'business_suspended', null, {}, req.headers['x-admin-ref'] as string);
+    res.json({ ok: true, data: { business_id: row.business_id, status: 'suspended' } });
   } catch (err) {
     next(err);
   }

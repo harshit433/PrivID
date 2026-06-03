@@ -15,6 +15,7 @@ import { livenessRouter } from './routes/liveness';
 import { simulationRouter } from './routes/simulation';
 import { numbersRouter } from './routes/numbers';
 import { statusRouter } from './routes/status';
+import { subscriptionsRouter } from './routes/subscriptions';
 import { adminRouter } from './routes/admin';
 import { errorHandler } from './middleware/errorHandler';
 import { apiLimiter, publicLimiter } from './middleware/rateLimit';
@@ -121,6 +122,7 @@ app.use('/auth', publicLimiter, authRouter);
 app.use('/users', apiLimiter, usersRouter);
 app.use('/connections', apiLimiter, connectionsRouter);
 app.use('/status', apiLimiter, statusRouter);
+app.use('/subscriptions', apiLimiter, subscriptionsRouter);
 app.use('/calls', apiLimiter, callsRouter);
 app.use('/channels', apiLimiter, channelsRouter);
 // Stream calls /chat/webhook server-to-server (no user) — exempt it from the

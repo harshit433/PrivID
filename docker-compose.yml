@@ -57,6 +57,33 @@ services:
       timeout: 5s
       retries: 5
 
+  business-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.business-api
+    image: trustroute-business-api:latest
+    container_name: trustroute_business_api
+    restart: unless-stopped
+    ports:
+      - '${BUSINESS_API_PORT:-3002}:3002'
+    env_file:
+      - api/.env
+    environment:
+      DATABASE_URL: postgresql://trustroute:trustroute_dev@postgres:5432/privid
+      REDIS_URL: redis://redis:6379
+      BUSINESS_API_PORT: 3002
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3002/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   redis:
     image: redis:7-alpine
     container_name: trustroute_redis

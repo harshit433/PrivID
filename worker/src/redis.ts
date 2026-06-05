@@ -9,7 +9,8 @@ let bullRedis: Redis | null = null;
 
 export function getBullRedis(): Redis {
   if (!bullRedis) {
-    bullRedis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379', {
+    const url = process.env.REDIS_PRIVATE_URL ?? process.env.REDIS_URL ?? 'redis://localhost:6379';
+    bullRedis = new Redis(url, {
       maxRetriesPerRequest: null,   // required by BullMQ
       enableReadyCheck: false,
     });

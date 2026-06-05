@@ -544,6 +544,13 @@ trustRouter.post('/verify/device', requireAuth, async (req: Request, res: Respon
       );
     }
 
+    // Mark integrity verified so completeDeviceRegistration can confirm it.
+    // The step-based flow sets this in /verify/device/integrity; the legacy
+    // combined endpoint must set it here after inline verification.
+    try {
+      await getRedis().set(`integrity_verified:${req.user!.sub}`, '1', 'EX', 900);
+    } catch { /* Redis down — completeDeviceRegistration will fail closed */ }
+
     // ── 4. SIM-binding / device fingerprint continuity ────────────────────────
     if (body.hardware_id && body.device_fingerprint) {
       // Both queries are independent — run in parallel to save ~30ms.

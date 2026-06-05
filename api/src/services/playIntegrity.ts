@@ -83,6 +83,23 @@ function isDevFallbackToken(token: string): boolean {
   return token.startsWith('dev-android-') || token.startsWith('dev-fallback-');
 }
 
+/** Compare nonces as raw bytes — Google may return standard base64 while we issue base64url. */
+function noncesMatch(expected: string, actual: string): boolean {
+  if (expected === actual) return true;
+  try {
+    const decode = (value: string): Buffer => {
+      const b64 = value.replace(/-/g, '+').replace(/_/g, '/');
+      const pad = b64.length % 4 === 0 ? b64 : b64 + '='.repeat(4 - (b64.length % 4));
+      return Buffer.from(pad, 'base64');
+    };
+    const a = decode(expected);
+    const b = decode(actual);
+    return a.length === b.length && a.equals(b);
+  } catch {
+    return false;
+  }
+}
+
 function devicePasses(verdicts: string[] | undefined, strict: boolean): boolean {
   const device = verdicts ?? [];
   if (device.length === 0) return false;
@@ -96,9 +113,18 @@ function devicePasses(verdicts: string[] | undefined, strict: boolean): boolean 
   );
 }
 
-function appPasses(appVerdict: string | undefined, strict: boolean): boolean {
+function appPasses(
+  appVerdict: string | undefined,
+  strict: boolean,
+  licenseVerdict?: string,
+): boolean {
   if (!appVerdict) return !strict;
-  if (strict) return appVerdict === 'PLAY_RECOGNIZED';
+  if (strict) {
+    if (appVerdict === 'PLAY_RECOGNIZED') return true;
+    // Fresh Play releases can stay UNRECOGNIZED_VERSION for hours while LICENSED is already true.
+    if (appVerdict === 'UNRECOGNIZED_VERSION' && licenseVerdict === 'LICENSED') return true;
+    return false;
+  }
   if (isPlayIntegritySideloadAllowed()) {
     return appVerdict === 'PLAY_RECOGNIZED' || appVerdict === 'UNRECOGNIZED_VERSION';
   }
@@ -129,11 +155,15 @@ function validateRequestDetails(
   }
 
   if (expectedNonce) {
-    if (!details.nonce || details.nonce !== expectedNonce) {
+    if (!details.nonce || !noncesMatch(expectedNonce, details.nonce)) {
       return {
         ok: false,
         reason: 'NONCE_MISMATCH',
-        details: { hasNonce: Boolean(details.nonce) },
+        details: {
+          hasNonce: Boolean(details.nonce),
+          expectedLen: expectedNonce.length,
+          actualLen: details.nonce?.length ?? 0,
+        },
       };
     }
   }
@@ -256,12 +286,14 @@ export async function verifyAndroidIntegrityToken(
     }
 
     const deviceOk = devicePasses(payload.deviceIntegrity?.deviceRecognitionVerdict, strict);
-    const appOk = appPasses(payload.appIntegrity?.appRecognitionVerdict, strict);
-    const licenseOk = licensePasses(payload.accountDetails?.appLicensingVerdict, strict);
+    const licenseVerdict = payload.accountDetails?.appLicensingVerdict;
+    const appOk = appPasses(payload.appIntegrity?.appRecognitionVerdict, strict, licenseVerdict);
+    const licenseOk = licensePasses(licenseVerdict, strict);
 
     if (!deviceOk || !appOk || !licenseOk) {
       logger.warn('playIntegrity', 'Integrity verdict failed', {
         strict,
+        reason: !deviceOk ? 'DEVICE_FAILED' : !appOk ? 'APP_FAILED' : 'LICENSE_FAILED',
         device: payload.deviceIntegrity?.deviceRecognitionVerdict,
         app: payload.appIntegrity?.appRecognitionVerdict,
         license: payload.accountDetails?.appLicensingVerdict,

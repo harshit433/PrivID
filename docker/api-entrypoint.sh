@@ -51,4 +51,15 @@ if [ "$#" -gt 0 ]; then
 fi
 
 echo "[entrypoint] Starting API on port ${API_PORT:-3000}..."
-exec node dist/server.js
+if [ -f "dist/server.js" ]; then
+  exec node dist/server.js
+fi
+
+# Fallback for workspace/tsconfig path layouts seen in some builds.
+if [ -f "dist/api/src/server.js" ]; then
+  exec node dist/api/src/server.js
+fi
+
+echo "[entrypoint] ERROR: build output missing. Expected dist/server.js (or dist/api/src/server.js)."
+echo "[entrypoint] Ensure Docker image runs 'npm run build' for @trustroute/api before startup."
+exit 1

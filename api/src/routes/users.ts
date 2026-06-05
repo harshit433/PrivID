@@ -17,7 +17,7 @@ usersRouter.get('/me', requireAuth, async (req: Request, res: Response, next: Ne
     const user = await queryOne<UserRow>(
       `SELECT user_id, handle, display_name, avatar_url, trust_tier, trust_score,
               phone_e164, email, profession, bio, business_info,
-              onboarding_complete, discovery_mode, created_at
+              onboarding_complete, discovery_mode, shadow_trust_enabled, created_at
        FROM users WHERE user_id = $1`,
       [req.user!.sub]
     );
@@ -60,6 +60,7 @@ const updateSchema = z.object({
   profession: optionalText(60),
   bio: optionalText(500),
   business_info: optionalText(1000),
+  shadow_trust_enabled: z.boolean().optional(),
 });
 
 usersRouter.patch('/me', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
@@ -87,6 +88,7 @@ usersRouter.patch('/me', requireAuth, async (req: Request, res: Response, next: 
     if (body.profession !== undefined) setField('profession', body.profession);
     if (body.bio !== undefined) setField('bio', body.bio);
     if (body.business_info !== undefined) setField('business_info', body.business_info);
+    if (body.shadow_trust_enabled !== undefined) setField('shadow_trust_enabled', body.shadow_trust_enabled);
 
     if (updates.length === 0) throw new AppError(400, 'NO_CHANGES', 'Nothing to update.');
     updates.push('updated_at = NOW()');
@@ -95,7 +97,8 @@ usersRouter.patch('/me', requireAuth, async (req: Request, res: Response, next: 
     const [user] = await query<UserRow>(
       `UPDATE users SET ${updates.join(', ')} WHERE user_id = $${i}
        RETURNING user_id, handle, display_name, avatar_url, trust_tier, trust_score,
-                 phone_e164, email, profession, bio, business_info, discovery_mode`,
+                 phone_e164, email, profession, bio, business_info, discovery_mode,
+                 shadow_trust_enabled`,
       params
     );
 
@@ -354,7 +357,17 @@ usersRouter.post('/lookup-by-phones', requireAuth, async (req: Request, res: Res
       [req.user!.sub, ...hashes],
     );
 
-    res.json({ ok: true, data: found.map(({ phone_hash: _ph, ...u }) => u) });
+    res.json({
+      ok: true,
+      data: found.map((u) => ({
+        user_id: u.user_id,
+        handle: u.handle,
+        display_name: u.display_name,
+        trust_tier: u.trust_tier,
+        trust_score: u.trust_score,
+        phone_hash: u.phone_hash,
+      })),
+    });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
     next(err);

@@ -85,6 +85,8 @@ export const keys = {
   presence: (userId: string) => `presence:${userId}`,
   /** Cached trust score breakdown — 5-min TTL, invalidated on recomputeAndPersist. */
   trustScore: (userId: string) => `trust_score:${userId}`,
+  /** Cached shadow/caller lookup by phone hash — 10-min TTL. */
+  shadowCaller: (phoneHash: string) => `shadow:caller:${phoneHash}`,
   /**
    * Shadow score feedback cooldown — prevents the same user being submitted
    * as an ML training label more than once per 7-day window.

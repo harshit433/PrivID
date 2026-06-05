@@ -78,4 +78,5 @@ exports.keys = {
     simSmsChallenge: (userId) => `sim_sms:${userId}`,
     /** SIM SMS send counter — per user, only incremented after successful delivery. TTL 15 min. */
     rateLimitSimSms: (userId) => `ratelimit:sim_sms:${userId}`,
+    shadowCaller: (phoneHash) => `shadow:caller:${phoneHash}`,
 };

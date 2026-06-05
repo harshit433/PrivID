@@ -51,14 +51,23 @@ export async function recomputeShadowScores(): Promise<number> {
     `WITH aggregated AS (
        SELECT
          o.phone_hash,
-         COUNT(*)                                                          AS total,
-         COUNT(*) FILTER (WHERE o.outcome = 'picked_up')  ::numeric       AS picked_up,
-         COUNT(*) FILTER (WHERE o.outcome = 'declined')   ::numeric       AS declined,
-         COUNT(*) FILTER (WHERE o.outcome = 'blocked')    ::numeric       AS blocked,
-         COUNT(*) FILTER (WHERE o.outcome = 'saved')      ::numeric       AS saved,
-         COUNT(*) FILTER (WHERE o.outcome = 'hung_up_fast')::numeric      AS hung_fast
+         COUNT(*)::int                                                       AS obs_count,
+         COALESCE(SUM(o.weight), 0)                                        AS weight_total,
+         COALESCE(SUM(o.weight) FILTER (WHERE o.outcome IN (
+           'picked_up', 'incoming_accepted', 'outgoing_answered'
+         )), 0)::numeric                                                   AS picked_up,
+         COALESCE(SUM(o.weight) FILTER (WHERE o.outcome IN (
+           'declined', 'incoming_declined', 'outgoing_declined',
+           'incoming_missed', 'outgoing_missed'
+         )), 0)::numeric                                                   AS declined,
+         COALESCE(SUM(o.weight) FILTER (WHERE o.outcome IN (
+           'blocked', 'incoming_blocked'
+         )), 0)::numeric                                                   AS blocked,
+         COALESCE(SUM(o.weight) FILTER (WHERE o.outcome = 'saved'), 0)::numeric AS saved,
+         COALESCE(SUM(o.weight) FILTER (WHERE o.outcome = 'hung_up_fast'), 0)::numeric AS hung_fast
        FROM dialer_observations o
        WHERE o.observed_at > NOW() - ($1 || ' days')::INTERVAL
+         AND o.weight > 0
          AND (
            -- Only recompute hashes with activity since last update
            NOT EXISTS (
@@ -73,20 +82,22 @@ export async function recomputeShadowScores(): Promise<number> {
      scored AS (
        SELECT
          phone_hash,
-         total,
-         CASE WHEN total > 0 THEN ROUND(picked_up  / total, 4) ELSE 0 END AS pick_rate,
-         CASE WHEN total > 0 THEN ROUND(declined    / total, 4) ELSE 0 END AS declined_rate,
-         CASE WHEN total > 0 THEN ROUND(blocked     / total, 4) ELSE 0 END AS block_rate,
-         CASE WHEN total > 0 THEN ROUND(saved       / total, 4) ELSE 0 END AS save_rate,
-         CASE WHEN total > 0 THEN ROUND(hung_fast   / total, 4) ELSE 0 END AS hung_fast_rate,
+         obs_count,
+         weight_total,
+         CASE WHEN weight_total > 0 THEN ROUND(picked_up  / weight_total, 4) ELSE 0 END AS pick_rate,
+         CASE WHEN weight_total > 0 THEN ROUND(declined    / weight_total, 4) ELSE 0 END AS declined_rate,
+         CASE WHEN weight_total > 0 THEN ROUND(blocked     / weight_total, 4) ELSE 0 END AS block_rate,
+         CASE WHEN weight_total > 0 THEN ROUND(saved       / weight_total, 4) ELSE 0 END AS save_rate,
+         CASE WHEN weight_total > 0 THEN ROUND(hung_fast   / weight_total, 4) ELSE 0 END AS hung_fast_rate,
          CASE
-           WHEN total < $2 THEN 50
+           WHEN obs_count < $2 THEN 50
            ELSE GREATEST(0, LEAST(100, ROUND(
              50
-             + 25 * (CASE WHEN total > 0 THEN picked_up  / total ELSE 0 END)
-             + 30 * (CASE WHEN total > 0 THEN saved       / total ELSE 0 END)
-             - 50 * (CASE WHEN total > 0 THEN blocked     / total ELSE 0 END)
-             - 15 * (CASE WHEN total > 0 THEN hung_fast   / total ELSE 0 END)
+             + 25 * (CASE WHEN weight_total > 0 THEN picked_up  / weight_total ELSE 0 END)
+             + 30 * (CASE WHEN weight_total > 0 THEN saved       / weight_total ELSE 0 END)
+             - 50 * (CASE WHEN weight_total > 0 THEN blocked     / weight_total ELSE 0 END)
+             - 20 * (CASE WHEN weight_total > 0 THEN declined    / weight_total ELSE 0 END)
+             - 15 * (CASE WHEN weight_total > 0 THEN hung_fast   / weight_total ELSE 0 END)
            )))
          END AS shadow_score
        FROM aggregated
@@ -95,7 +106,7 @@ export async function recomputeShadowScores(): Promise<number> {
             (phone_hash, pick_rate, declined_rate, block_rate, save_rate,
              hung_fast_rate, observation_count, shadow_score, last_updated_at)
      SELECT phone_hash, pick_rate, declined_rate, block_rate, save_rate,
-            hung_fast_rate, total::int, shadow_score, NOW()
+            hung_fast_rate, obs_count, shadow_score, NOW()
      FROM scored
      ON CONFLICT (phone_hash) DO UPDATE
        SET pick_rate         = EXCLUDED.pick_rate,

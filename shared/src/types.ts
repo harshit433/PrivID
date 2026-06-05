@@ -123,15 +123,34 @@ export interface ShadowNumberRow {
   last_updated_at:   Date;
 }
 
-export type DialerOutcome = 'picked_up' | 'declined' | 'blocked' | 'saved' | 'hung_up_fast';
+export type DialerOutcome =
+  | 'picked_up'
+  | 'declined'
+  | 'blocked'
+  | 'saved'
+  | 'hung_up_fast'
+  | 'incoming_accepted'
+  | 'incoming_declined'
+  | 'incoming_missed'
+  | 'incoming_blocked'
+  | 'outgoing_answered'
+  | 'outgoing_missed'
+  | 'outgoing_declined';
+
+export type DialerDirection = 'incoming' | 'outgoing';
 
 export interface DialerObservationRow {
-  obs_id:      string;
-  observer_id: string;
-  phone_hash:  string;
-  outcome:     DialerOutcome;
-  duration_s:  number | null;
-  observed_at: Date;
+  obs_id:              string;
+  observer_id:         string;
+  phone_hash:          string;
+  outcome:             DialerOutcome;
+  direction:           DialerDirection | null;
+  is_contact:          boolean;
+  is_trustroute_user:  boolean;
+  context_label:       string | null;
+  weight:              number;
+  duration_s:          number | null;
+  observed_at:         Date;
 }
 
 // ─── Presence ─────────────────────────────────────────────────────────────────

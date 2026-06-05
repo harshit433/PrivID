@@ -9,7 +9,7 @@ import { query, queryOne, withTransaction, getRedis, keys } from '@trustroute/sh
 import type { OtpSessionRow, UserRow, RefreshTokenRow, ShadowNumberRow } from '@trustroute/shared';
 import { AppError } from '../middleware/errorHandler';
 import { requireAuth } from '../middleware/auth';
-import { verifyMsg91AccessToken } from '../services/msg91';
+import { verifyMsg91AccessToken, sendLoginOtpSms } from '../services/msg91';
 import { recomputeAndPersist } from '../services/trustScore';
 import { buildHandleCandidates } from '../utils/handles';
 import { logger } from '../utils/logger';
@@ -507,6 +507,194 @@ authRouter.get('/handles/:handle/available', async (req: Request, res: Response,
     const taken = await queryOne(`SELECT handle FROM users WHERE handle = $1`, [handle]);
     res.json({ ok: true, data: { available: !taken } });
   } catch (err) {
+    next(err);
+  }
+});
+
+// ─── POST /auth/otp/send ─────────────────────────────────────────────────────
+// Server generates a 6-digit OTP, stores the hash in Redis, and delivers the
+// code via MSG91's OTP API. No MSG91 widget credentials required on the client.
+
+const OTP_SESSION_TTL_SEC = 10 * 60; // 10 min
+const OTP_MAX_ATTEMPTS = 5;
+const OTP_RATE_LIMIT = 5; // per 10-min window
+
+const otpSendSchema = z.object({
+  phone_e164: z.string().regex(/^\+[1-9]\d{7,14}$/, 'Invalid phone number'),
+  mode: z.enum(['signup', 'login']),
+});
+
+authRouter.post('/otp/send', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { phone_e164, mode } = otpSendSchema.parse(req.body);
+    const redis = getRedis();
+
+    // Registration check
+    const existingUser = await queryOne<UserRow>(
+      `SELECT user_id FROM users WHERE phone_e164 = $1 AND is_active = TRUE`,
+      [phone_e164],
+    );
+    if (mode === 'signup' && existingUser) {
+      throw new AppError(409, 'PHONE_REGISTERED', 'This number is already registered. Log in instead.');
+    }
+    if (mode === 'login' && !existingUser) {
+      throw new AppError(404, 'USER_NOT_FOUND', 'No account found for this number. Sign up instead.');
+    }
+
+    // Rate limit: 5 sends per phone per 10 minutes
+    const rateLimitKey = keys.rateLimitOtp(phone_e164);
+    const attempts = await redis.incr(rateLimitKey);
+    if (attempts === 1) await redis.expire(rateLimitKey, 600);
+    if (attempts > OTP_RATE_LIMIT) {
+      throw new AppError(429, 'RATE_LIMITED', 'Too many OTP requests. Try again in 10 minutes.');
+    }
+
+    const sessionId = crypto.randomUUID();
+    const otp = generateOtp();
+    const otp_hash = await bcrypt.hash(otp, 10);
+
+    await redis.setex(
+      keys.otpSession(sessionId),
+      OTP_SESSION_TTL_SEC,
+      JSON.stringify({ phone_e164, otp_hash, attempts: 0, mode }),
+    );
+
+    await sendLoginOtpSms(phone_e164, otp);
+
+    res.json({
+      ok: true,
+      data: {
+        session_id: sessionId,
+        expires_in: OTP_SESSION_TTL_SEC,
+        ...(process.env.NODE_ENV !== 'production' && { _dev_otp: otp }),
+      },
+    });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
+// ─── POST /auth/otp/verify ────────────────────────────────────────────────────
+// Verifies the OTP the user typed against our Redis-stored hash.
+// Returns TrustRoute JWTs on success (or needs_handle for new users).
+
+const otpVerifySchema = z.object({
+  session_id: z.string().uuid(),
+  otp: z.string().length(6),
+});
+
+authRouter.post('/otp/verify', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { session_id, otp } = otpVerifySchema.parse(req.body);
+    const redis = getRedis();
+
+    const raw = await redis.get(keys.otpSession(session_id));
+    if (!raw) {
+      throw new AppError(404, 'SESSION_NOT_FOUND', 'OTP session not found or expired. Please request a new code.');
+    }
+
+    const session = JSON.parse(raw) as {
+      phone_e164: string;
+      otp_hash: string;
+      attempts: number;
+      mode: string;
+    };
+
+    if (session.attempts >= OTP_MAX_ATTEMPTS) {
+      await redis.del(keys.otpSession(session_id));
+      throw new AppError(429, 'TOO_MANY_ATTEMPTS', 'Too many failed attempts. Please request a new code.');
+    }
+
+    const valid = await bcrypt.compare(otp, session.otp_hash);
+    if (!valid) {
+      session.attempts += 1;
+      await redis.setex(keys.otpSession(session_id), OTP_SESSION_TTL_SEC, JSON.stringify(session));
+      const remaining = OTP_MAX_ATTEMPTS - session.attempts;
+      throw new AppError(
+        401,
+        'INVALID_OTP',
+        remaining > 0
+          ? `Incorrect code. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
+          : 'Incorrect code.',
+      );
+    }
+
+    // OTP verified — consume session
+    await redis.del(keys.otpSession(session_id));
+    const { phone_e164 } = session;
+
+    const existing = await queryOne<UserRow>(
+      `SELECT * FROM users WHERE phone_e164 = $1 AND is_active = TRUE`,
+      [phone_e164],
+    );
+
+    if (existing) {
+      await markPhoneVerified(existing.user_id);
+      const updated = await queryOne<UserRow>(`SELECT * FROM users WHERE user_id = $1`, [existing.user_id]);
+      const { statusCode, body } = await issueAuthResponse(updated ?? existing);
+      return res.status(statusCode).json(body);
+    }
+
+    // New user — store pending signup, ask for handle
+    const signup_token = crypto.randomUUID();
+    await redis.setex(
+      keys.msg91SignupPending(signup_token),
+      MSG91_SIGNUP_TTL_SEC,
+      JSON.stringify({ phone_e164 }),
+    );
+    return res.json({ ok: true, data: { needs_handle: true, phone_e164, signup_token } });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
+// ─── POST /auth/otp/resend ────────────────────────────────────────────────────
+// Generates a fresh OTP for an existing session (same session_id, new code).
+
+const otpResendSchema = z.object({
+  session_id: z.string().uuid(),
+});
+
+authRouter.post('/otp/resend', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { session_id } = otpResendSchema.parse(req.body);
+    const redis = getRedis();
+
+    const raw = await redis.get(keys.otpSession(session_id));
+    if (!raw) {
+      throw new AppError(404, 'SESSION_NOT_FOUND', 'OTP session not found or expired. Please request a new code.');
+    }
+
+    const session = JSON.parse(raw) as { phone_e164: string; otp_hash: string; attempts: number; mode: string };
+    const { phone_e164 } = session;
+
+    // Resend rate limit: reuse the same per-phone rate limit key
+    const rateLimitKey = keys.rateLimitOtp(phone_e164);
+    const count = await redis.incr(rateLimitKey);
+    if (count === 1) await redis.expire(rateLimitKey, 600);
+    if (count > OTP_RATE_LIMIT) {
+      throw new AppError(429, 'RATE_LIMITED', 'Too many OTP requests. Try again in 10 minutes.');
+    }
+
+    const otp = generateOtp();
+    const otp_hash = await bcrypt.hash(otp, 10);
+    const updated = { ...session, otp_hash, attempts: 0 };
+
+    await redis.setex(keys.otpSession(session_id), OTP_SESSION_TTL_SEC, JSON.stringify(updated));
+    await sendLoginOtpSms(phone_e164, otp);
+
+    res.json({
+      ok: true,
+      data: {
+        session_id,
+        expires_in: OTP_SESSION_TTL_SEC,
+        ...(process.env.NODE_ENV !== 'production' && { _dev_otp: otp }),
+      },
+    });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
     next(err);
   }
 });

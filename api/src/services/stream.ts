@@ -288,6 +288,68 @@ export async function getConnectionTypeFor(
   };
 }
 
+// ─── Group channel helpers ────────────────────────────────────────────────────
+
+/** Create a named group channel in Stream with the given members. */
+export async function createGroupChannel(
+  channelId: string,
+  name: string,
+  creatorId: string,
+  memberIds: string[],
+  avatarUrl?: string | null,
+): Promise<void> {
+  const sc = getStreamClient();
+  const allMembers = [...new Set([creatorId, ...memberIds])];
+  const ch = sc.channel('messaging', channelId, {
+    created_by_id: creatorId,
+    members: allMembers,
+    ...({ name, is_group: true, ...(avatarUrl ? { image: avatarUrl } : {}) } as any),
+  });
+  await ch.create();
+  // Grant admin role to creator
+  await ch.addMembers([{ user_id: creatorId, channel_role: 'channel_admin' as any }]);
+}
+
+/** Add one user to an existing group channel (member role). */
+export async function addGroupMember(channelId: string, userId: string, asAdmin = false): Promise<void> {
+  const sc = getStreamClient();
+  const ch = sc.channel('messaging', channelId);
+  await ch.addMembers([{ user_id: userId, channel_role: (asAdmin ? 'channel_admin' : 'channel_member') as any }]);
+}
+
+/** Remove a user from a group channel. */
+export async function removeGroupMember(channelId: string, userId: string): Promise<void> {
+  const sc = getStreamClient();
+  const ch = sc.channel('messaging', channelId);
+  await ch.removeMembers([userId]);
+}
+
+/** Update group name and/or image in Stream. */
+export async function updateGroupChannel(
+  channelId: string,
+  updates: { name?: string; image?: string | null },
+): Promise<void> {
+  const sc = getStreamClient();
+  const ch = sc.channel('messaging', channelId);
+  const partial: Record<string, unknown> = {};
+  if (updates.name !== undefined) partial.name = updates.name;
+  if (updates.image !== undefined) partial.image = updates.image ?? null;
+  if (Object.keys(partial).length > 0) await ch.update(partial as any);
+}
+
+/** Hard-delete a group channel from Stream (removes all messages). */
+export async function deleteGroupChannel(channelId: string): Promise<void> {
+  const sc = getStreamClient();
+  const ch = sc.channel('messaging', channelId);
+  await ch.delete({ hard_delete: true } as any);
+}
+
+/** Delete a message as a server-side admin (any message, not just the sender's). */
+export async function deleteMessageAsAdmin(messageId: string): Promise<void> {
+  const sc = getStreamClient();
+  await sc.deleteMessage(messageId, true);
+}
+
 /** End-to-end gate: fetch connection + counts, then compute. */
 export async function gateForSender(senderId: string, recipientId: string): Promise<ChatGate> {
   const [{ connection_type, temporary_expires_at }, totalUsed, todayUsed] = await Promise.all([

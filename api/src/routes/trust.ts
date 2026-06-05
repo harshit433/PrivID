@@ -37,15 +37,18 @@ trustRouter.get('/nonce', requireAuth, async (req: Request, res: Response, next:
 
 trustRouter.get('/score', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const breakdown = await computeTrustScore(req.user!.sub);
-    const history = await query(
-      `SELECT old_score, new_score, old_tier, new_tier, reason, created_at
-       FROM trust_score_history
-       WHERE user_id = $1
-       ORDER BY created_at DESC
-       LIMIT 10`,
-      [req.user!.sub]
-    );
+    // Both queries are independent — run in parallel.
+    const [breakdown, history] = await Promise.all([
+      computeTrustScore(req.user!.sub),
+      query(
+        `SELECT old_score, new_score, old_tier, new_tier, reason, created_at
+           FROM trust_score_history
+          WHERE user_id = $1
+          ORDER BY created_at DESC
+          LIMIT 10`,
+        [req.user!.sub],
+      ),
+    ]);
 
     res.json({
       ok: true,
@@ -502,30 +505,27 @@ trustRouter.post('/verify/device', requireAuth, async (req: Request, res: Respon
 
     // ── 4. SIM-binding / device fingerprint continuity ────────────────────────
     if (body.hardware_id && body.device_fingerprint) {
-      // Check if this hardware ID is already bound to a DIFFERENT user
-      const existing = await queryOne<{ user_id: string }>(
-        `SELECT user_id FROM device_registrations
-         WHERE hardware_id = $1 AND user_id != $2
-         LIMIT 1`,
-        [body.hardware_id, req.user!.sub]
-      );
+      // Both queries are independent — run in parallel to save ~30ms.
+      const [existing, ownReg] = await Promise.all([
+        queryOne<{ user_id: string }>(
+          `SELECT user_id FROM device_registrations
+           WHERE hardware_id = $1 AND user_id != $2
+           LIMIT 1`,
+          [body.hardware_id, req.user!.sub],
+        ),
+        queryOne<{ device_fingerprint: string | null }>(
+          `SELECT device_fingerprint FROM device_registrations
+           WHERE user_id = $1 AND hardware_id = $2
+           LIMIT 1`,
+          [req.user!.sub, body.hardware_id],
+        ),
+      ]);
+
       if (existing) {
-        // Hardware ID tied to another account — silently log, don't block
-        // (legitimate when someone factory-resets and makes a new account)
         logger.warn('trust', `hardware_id ${body.hardware_id} was previously bound to user ${existing.user_id}`);
       }
-
-      // If this user already has a registration with a DIFFERENT fingerprint, it
-      // means the SIM changed (or app reinstall). Flag it but don't block for now.
-      const ownReg = await queryOne<{ device_fingerprint: string | null }>(
-        `SELECT device_fingerprint FROM device_registrations
-         WHERE user_id = $1 AND hardware_id = $2
-         LIMIT 1`,
-        [req.user!.sub, body.hardware_id]
-      );
       if (ownReg && ownReg.device_fingerprint && ownReg.device_fingerprint !== body.device_fingerprint) {
         logger.warn('trust', `SIM fingerprint changed for user ${req.user!.sub} — possible SIM swap`);
-        // In production you'd set a flag and require re-verification
       }
     }
 

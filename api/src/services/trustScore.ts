@@ -34,7 +34,7 @@
  *   - Score drops below 20 for the first time (behavioral degradation)
  */
 
-import { query, queryOne, withTransaction } from '@trustroute/shared';
+import { query, queryOne, withTransaction, getRedis, keys } from '@trustroute/shared';
 import {
   computeVerificationPoints,
   scoreToTier,
@@ -47,6 +47,8 @@ import type { TrustTier, UserRow } from '@trustroute/shared';
 import { extractFeatures } from './featureStore';
 import { mlScoreUser, mlBatchScore } from './mlClient';
 import type { UserFeatures } from './featureStore';
+
+const TRUST_SCORE_TTL_S = 300; // 5 minutes — short enough to stay fresh, long enough to avoid redundant ML calls
 
 // Re-export constants for backward compat with any other imports
 export { VERIFICATION_WEIGHTS, TIER_THRESHOLDS, REVIEW_THRESHOLD, scoreToTier };
@@ -76,7 +78,28 @@ export interface TrustBreakdown {
 
 // ─── Core score computation ────────────────────────────────────────────────────
 
+/**
+ * Clears the cached trust score for a user.
+ * Call after any operation that changes trust factors (factor completion,
+ * recomputeAndPersist, admin adjustments) so the next read gets fresh data.
+ */
+export async function invalidateTrustScoreCache(userId: string): Promise<void> {
+  try {
+    await getRedis().del(keys.trustScore(userId));
+  } catch { /* Redis unavailable — next read will recompute */ }
+}
+
 export async function computeTrustScore(userId: string): Promise<TrustBreakdown> {
+  // ── Cache check (Redis) ────────────────────────────────────────────────────
+  // Trust scores are expensive: verification DB queries + ML HTTP call (100–500ms).
+  // A 5-min TTL keeps the UI fresh without hammering the ML service on every
+  // HomeScreen focus. Invalidated immediately after recomputeAndPersist().
+  try {
+    const redis = getRedis();
+    const cached = await redis.get(keys.trustScore(userId));
+    if (cached) return JSON.parse(cached) as TrustBreakdown;
+  } catch { /* Redis down — fall through to live computation */ }
+
   // Verification points (shared, deterministic) + ML feature extraction in parallel
   const [verif, userFeatures] = await Promise.all([
     computeVerificationPoints(userId),
@@ -108,7 +131,12 @@ export async function computeTrustScore(userId: string): Promise<TrustBreakdown>
   }
 
   const total = clampScore(verif.total + factors.ml_modifier);
-  return { total, tier: scoreToTier(total), factors, ml: mlResult };
+  const result: TrustBreakdown = { total, tier: scoreToTier(total), factors, ml: mlResult };
+
+  // Write to cache (fire-and-forget — never block the response on a Redis write)
+  getRedis().setex(keys.trustScore(userId), TRUST_SCORE_TTL_S, JSON.stringify(result)).catch(() => {});
+
+  return result;
 }
 
 // ─── Bulk compute (simulation + admin jobs) ───────────────────────────────────
@@ -305,6 +333,9 @@ export async function bulkComputeScores(userIds: string[]): Promise<Array<{
 // ─── Persist recomputed score + trigger review ────────────────────────────────
 
 export async function recomputeAndPersist(userId: string): Promise<TrustBreakdown> {
+  // Invalidate cache before computing so we always get a fresh ML result here.
+  // The new result gets re-cached inside computeTrustScore().
+  await invalidateTrustScoreCache(userId);
   const breakdown = await computeTrustScore(userId);
 
   await withTransaction(async (client) => {

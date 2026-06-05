@@ -116,16 +116,169 @@ export async function rtdbUpdateStatus(
   }
 }
 
+// ── RTDB — Activity Session Signaling ────────────────────────────────────────
+
+export type ActivityAdapter = 'youtube' | 'screen_share';
+export type ActivityStatus = 'active' | 'ended';
+
+export interface ActivityParticipantSignal {
+  user_id: string;
+  handle: string;
+  display_name: string;
+  avatar_url?: string | null;
+  role?: 'host' | 'participant';
+}
+
+export interface ActivitySessionSignal {
+  activity_id: string;
+  scope_type: 'direct' | 'group';
+  scope_id: string;
+  adapter: ActivityAdapter;
+  status: ActivityStatus;
+  livekit_room_id: string;
+  host_user_id: string;
+  controller_user_id: string;
+  presenter_user_id?: string | null;
+  created_by: string;
+  created_at: number;
+  state_revision: number;
+  state: Record<string, unknown>;
+  host: ActivityParticipantSignal;
+}
+
+export async function rtdbCreateActivitySession(payload: ActivitySessionSignal): Promise<void> {
+  const db = getDb();
+  if (!db) return;
+  try {
+    const { host, ...session } = payload;
+    await db.ref(`activities/${payload.activity_id}`).set({
+      ...session,
+      updated_at: Date.now(),
+      participants: {
+        [host.user_id]: {
+          ...host,
+          role: 'host',
+          joined_at: Date.now(),
+          active: true,
+        },
+      },
+      messages: null,
+    });
+  } catch (err: any) {
+    logger.warn('RTDB', 'rtdbCreateActivitySession failed:', err?.message);
+  }
+}
+
+export async function rtdbUpdateActivityParticipant(
+  activityId: string,
+  participant: ActivityParticipantSignal,
+  active: boolean,
+): Promise<void> {
+  const db = getDb();
+  if (!db) return;
+  try {
+    await db.ref(`activities/${activityId}/participants/${participant.user_id}`).update({
+      ...participant,
+      active,
+      ...(active ? { joined_at: Date.now(), left_at: null } : { left_at: Date.now() }),
+      updated_at: Date.now(),
+    });
+  } catch (err: any) {
+    logger.warn('RTDB', 'rtdbUpdateActivityParticipant failed:', err?.message);
+  }
+}
+
+export async function rtdbUpdateActivityControl(
+  activityId: string,
+  params: {
+    host_user_id?: string;
+    controller_user_id?: string;
+    presenter_user_id?: string | null;
+  },
+): Promise<void> {
+  const db = getDb();
+  if (!db) return;
+  try {
+    await db.ref(`activities/${activityId}`).update({
+      ...params,
+      updated_at: Date.now(),
+    });
+  } catch (err: any) {
+    logger.warn('RTDB', 'rtdbUpdateActivityControl failed:', err?.message);
+  }
+}
+
+export async function rtdbUpdateActivityState(
+  activityId: string,
+  state: Record<string, unknown>,
+  revision: number,
+): Promise<void> {
+  const db = getDb();
+  if (!db) return;
+  try {
+    await db.ref(`activities/${activityId}`).update({
+      state,
+      state_revision: revision,
+      updated_at: Date.now(),
+    });
+  } catch (err: any) {
+    logger.warn('RTDB', 'rtdbUpdateActivityState failed:', err?.message);
+  }
+}
+
+export async function rtdbAppendActivityMessage(
+  activityId: string,
+  message: {
+    user_id: string;
+    handle: string;
+    display_name: string;
+    text: string;
+  },
+): Promise<string | null> {
+  const db = getDb();
+  if (!db) return null;
+  try {
+    const ref = db.ref(`activities/${activityId}/messages`).push();
+    await ref.set({
+      message_id: ref.key,
+      ...message,
+      created_at: Date.now(),
+    });
+    return ref.key;
+  } catch (err: any) {
+    logger.warn('RTDB', 'rtdbAppendActivityMessage failed:', err?.message);
+    return null;
+  }
+}
+
+export async function rtdbEndActivitySession(activityId: string): Promise<void> {
+  const db = getDb();
+  if (!db) return;
+  try {
+    await db.ref(`activities/${activityId}`).update({
+      status: 'ended',
+      ended_at: Date.now(),
+      updated_at: Date.now(),
+    });
+    setTimeout(async () => {
+      try { await db.ref(`activities/${activityId}`).remove(); } catch { /* ignore */ }
+    }, 10 * 60_000);
+  } catch (err: any) {
+    logger.warn('RTDB', 'rtdbEndActivitySession failed:', err?.message);
+  }
+}
+
 // ── FCM — Incoming call wakeup push ──────────────────────────────────────────
 
 export interface IncomingCallPayload {
-  callId:         string;
-  fromUserId:     string;
-  handle:         string;
-  displayName:    string;
-  avatarUrl?:     string;
-  trustTier:      string;
-  trustScore:     number;
+  callId:          string;
+  webrtcRoomId:    string;
+  fromUserId:      string;
+  handle:          string;
+  displayName:     string;
+  avatarUrl?:      string;
+  trustTier:       string;
+  trustScore:      number;
   connectionType?: string;
 }
 
@@ -143,15 +296,16 @@ export async function sendIncomingCallPush(
     await app.messaging().send({
       token: fcmToken,
       data: {
-        type:            'incoming_call',
-        call_id:         payload.callId,
-        from_user_id:    payload.fromUserId,
-        handle:          payload.handle,
-        display_name:    payload.displayName,
-        avatar_url:      payload.avatarUrl    ?? '',
-        trust_tier:      payload.trustTier,
-        trust_score:     String(payload.trustScore),
-        connection_type: payload.connectionType ?? '',
+        type:             'incoming_call',
+        call_id:          payload.callId,
+        webrtc_room_id:   payload.webrtcRoomId,
+        from_user_id:     payload.fromUserId,
+        handle:           payload.handle,
+        display_name:     payload.displayName,
+        avatar_url:       payload.avatarUrl    ?? '',
+        trust_tier:       payload.trustTier,
+        trust_score:      String(payload.trustScore),
+        connection_type:  payload.connectionType ?? '',
       },
       android: {
         priority: 'high',

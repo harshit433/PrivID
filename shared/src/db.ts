@@ -6,9 +6,13 @@ export function getPool(): Pool {
   if (!pool) {
     pool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      max: 20,
+      // 40 connections: enough headroom for concurrent call initiations + background jobs
+      // without exhausting Railway's Postgres connection limit (~100 on most plans).
+      max: 40,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 5_000,
+      // Keep connections warm — avoids TCP handshake on cold slots under burst traffic.
+      allowExitOnIdle: false,
     });
 
     pool.on('error', (err) => {

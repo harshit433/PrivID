@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { query, queryOne, withTransaction } from '@trustroute/shared';
+import { query, queryOne, withTransaction, getRedis } from '@trustroute/shared';
 import type { CallRow, ConnectionRow, ReachabilityChannelRow } from '@trustroute/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
@@ -82,15 +82,24 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
     } else {
       calleeId = body.callee_id!;
 
-      // Block callers whose trust score has dropped below the review threshold
-      // Also check call restriction (set by admin 'restrict' action)
-      const callerStatus = await queryOne<{
-        is_under_review:        boolean;
-        call_restriction_until: Date | null;
-      }>(
-        `SELECT is_under_review, call_restriction_until FROM users WHERE user_id = $1`,
-        [callerId],
-      );
+      // Fetch caller status + callee connection/settings in one parallel round-trip.
+      // All three queries are independent of each other — no reason to run serially.
+      // callerConn (the caller's OWN record toward this callee) is only needed when
+      // the caller has an active restriction; it's fetched separately below only then.
+      const [callerStatus, calleeConn, calleeUser] = await Promise.all([
+        queryOne<{ is_under_review: boolean; call_restriction_until: Date | null }>(
+          `SELECT is_under_review, call_restriction_until FROM users WHERE user_id = $1`,
+          [callerId],
+        ),
+        queryOne<ConnectionRow>(
+          `SELECT * FROM connections WHERE owner_id = $1 AND contact_id = $2`,
+          [calleeId, callerId],
+        ),
+        queryOne<{ discovery_mode: string }>(
+          `SELECT discovery_mode FROM users WHERE user_id = $1`,
+          [calleeId],
+        ),
+      ]);
 
       if (callerStatus?.is_under_review) {
         throw new AppError(403, 'ACCOUNT_UNDER_REVIEW',
@@ -98,10 +107,8 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
       }
 
       // Restriction check — only applies to non-trusted callees
-      // (Trusted contacts must always remain reachable regardless of restriction)
       const restriction = callerStatus?.call_restriction_until;
       if (restriction && new Date(restriction) > new Date()) {
-        // Check the caller's OWN connection to the callee (not the reverse)
         const callerConn = await queryOne<{ connection_type: string }>(
           `SELECT connection_type FROM connections WHERE owner_id = $1 AND contact_id = $2`,
           [callerId, body.callee_id!],
@@ -111,7 +118,6 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
           callerConn?.connection_type === 'temporary';
 
         if (!isTrustedByMe) {
-          // Count non-trusted outgoing calls in the last 24 h under restriction
           const RESTRICTION_DAILY_CAP = 5;
           const [restrictedCallCount] = await query<{ count: string }>(
             `SELECT COUNT(*)::text AS count
@@ -139,19 +145,6 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
           }
         }
       }
-
-      // Check caller's permission from callee's perspective
-      // Check callee's connection record for the caller (direct calls only)
-      const [calleeConn, calleeUser] = await Promise.all([
-        queryOne<ConnectionRow>(
-          `SELECT * FROM connections WHERE owner_id = $1 AND contact_id = $2`,
-          [calleeId, callerId],
-        ),
-        queryOne<{ discovery_mode: string }>(
-          `SELECT discovery_mode FROM users WHERE user_id = $1`,
-          [calleeId],
-        ),
-      ]);
 
       const connType = calleeConn?.connection_type ?? 'unknown';
 
@@ -192,7 +185,6 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
         // This is the ONLY rate limit applied — trusted contacts are never throttled.
         if (connType === 'unknown') {
           try {
-            const { getRedis } = await import('@trustroute/shared');
             const redis = getRedis();
             const rlKey = `call_unknown:${callerId}`;
             const count = await redis.incr(rlKey);
@@ -258,8 +250,14 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
       return rows;
     });
 
-    // Track behavior event
-    await trackEvent(callerId, 'call_initiated', calleeId, { call_id: call.call_id, call_type: callType });
+    // ── Post-response work: behavior tracking + RTDB + FCM ───────────────────
+    // None of these affect the caller's response — move them off the hot path.
+    // setImmediate fires after the current event-loop tick (i.e. after the HTTP
+    // response is flushed), so the caller sees the 201 immediately.
+    setImmediate(() => {
+      trackEvent(callerId, 'call_initiated', calleeId, { call_id: call.call_id, call_type: callType })
+        .catch(() => {});
+    });
 
     // ── RTDB: write initial call state (fire-and-forget) ─────────────────────
     rtdbCreateCall(call.call_id, callerId, calleeId).catch(() => {});
@@ -290,14 +288,15 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
         if (!caller) return;
 
         await sendIncomingCallPush(callee.fcm_token, {
-          callId:         call.call_id,
-          fromUserId:     callerId,
-          handle:         caller.handle,
-          displayName:    caller.display_name ?? caller.handle,
-          avatarUrl:      caller.avatar_url   ?? undefined,
-          trustTier:      caller.trust_tier,
-          trustScore:     caller.trust_score,
-          connectionType: conn?.connection_type,
+          callId:          call.call_id,
+          webrtcRoomId:    call.webrtc_room_id ?? '',
+          fromUserId:      callerId,
+          handle:          caller.handle,
+          displayName:     caller.display_name ?? caller.handle,
+          avatarUrl:       caller.avatar_url   ?? undefined,
+          trustTier:       caller.trust_tier,
+          trustScore:      caller.trust_score,
+          connectionType:  conn?.connection_type,
         });
         logger.debug('calls', `FCM push sent to ${calleeId} for call ${call.call_id}`);
       } catch (err: any) {

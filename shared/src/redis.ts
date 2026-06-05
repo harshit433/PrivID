@@ -83,6 +83,8 @@ export const keys = {
    * If SET returns null (key existed), the DB was updated recently; skip.
    */
   presence: (userId: string) => `presence:${userId}`,
+  /** Cached trust score breakdown — 5-min TTL, invalidated on recomputeAndPersist. */
+  trustScore: (userId: string) => `trust_score:${userId}`,
   /**
    * Shadow score feedback cooldown — prevents the same user being submitted
    * as an ML training label more than once per 7-day window.

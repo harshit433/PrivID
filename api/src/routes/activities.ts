@@ -12,6 +12,7 @@ import {
   rtdbUpdateActivityControl,
   rtdbUpdateActivityParticipant,
   rtdbUpdateActivityState,
+  sendActivityPartyPush,
   type ActivityAdapter,
 } from '../services/fcm';
 
@@ -162,6 +163,51 @@ function serializeActivity(row: ActivityRow, participants: ActivityParticipantRo
       active: !p.left_at,
     })),
   };
+}
+
+async function notifyActivityPartyStarted(row: ActivityRow, creator: UserLite): Promise<void> {
+  let recipientIds: string[] = [];
+  if (row.scope_type === 'direct') {
+    const otherId =
+      row.direct_member_low === creator.user_id ? row.direct_member_high : row.direct_member_low;
+    if (otherId) recipientIds = [otherId];
+  } else {
+    const members = await query<{ user_id: string }>(
+      `SELECT user_id FROM group_members WHERE group_id = $1 AND user_id != $2`,
+      [row.group_id, creator.user_id],
+    );
+    recipientIds = members.map((m) => m.user_id);
+  }
+  if (recipientIds.length === 0) return;
+
+  const tokenRows = await query<{ user_id: string; fcm_token: string }>(
+    `SELECT user_id, fcm_token FROM users
+      WHERE user_id = ANY($1::uuid[]) AND fcm_token IS NOT NULL`,
+    [recipientIds],
+  );
+
+  const title = row.adapter === 'screen_share' ? 'Screen Share Party' : 'Watch Together';
+  const otherUserId =
+    row.scope_type === 'direct'
+      ? (row.direct_member_low === creator.user_id ? row.direct_member_high : row.direct_member_low)
+      : null;
+
+  await Promise.all(
+    tokenRows.map((t) =>
+      sendActivityPartyPush(t.fcm_token, {
+        activityId: row.activity_id,
+        adapter: row.adapter,
+        scopeType: row.scope_type,
+        scopeId: scopeId(row),
+        groupId: row.group_id,
+        otherUserId,
+        fromUserId: creator.user_id,
+        displayName: creator.display_name ?? creator.handle,
+        handle: creator.handle,
+        title,
+      }),
+    ),
+  );
 }
 
 async function getUserLite(userId: string): Promise<UserLite> {
@@ -369,6 +415,8 @@ activitiesRouter.post('/sessions', requireAuth, async (req: Request, res: Respon
         avatar_url: creator.avatar_url,
       },
     });
+
+    notifyActivityPartyStarted(row, creator).catch(() => {});
 
     res.status(201).json({ ok: true, data: serializeActivity(row, [{
       ...creator,

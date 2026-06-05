@@ -543,6 +543,22 @@ usersRouter.get('/:handle', requireAuth, async (req: Request, res: Response, nex
   }
 });
 
+// ─── POST /users/me/firebase-token ───────────────────────────────────────────
+// Custom Firebase Auth token for RTDB reads (activities, calls).
+
+usersRouter.post('/me/firebase-token', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { createFirebaseCustomToken } = await import('../services/fcm');
+    const token = await createFirebaseCustomToken(req.user!.sub);
+    if (!token) {
+      return next(new AppError(503, 'FIREBASE_UNAVAILABLE', 'Firebase is not configured.'));
+    }
+    res.json({ ok: true, data: { token } });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ─── PUT /users/me/push-token ─────────────────────────────────────────────────
 // Store FCM token directly on the users row — simple, reliable, no joins needed.
 

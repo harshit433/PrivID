@@ -286,6 +286,86 @@ export interface IncomingCallPayload {
  * Send a high-priority data-only FCM push to wake the callee's device.
  * RTDB handles real-time state after the device is awake.
  */
+// ── FCM — Activity party wakeup push ─────────────────────────────────────────
+
+export interface ActivityPartyPushPayload {
+  activityId: string;
+  adapter: ActivityAdapter;
+  scopeType: 'direct' | 'group';
+  scopeId: string;
+  groupId?: string | null;
+  otherUserId?: string | null;
+  fromUserId: string;
+  displayName: string;
+  handle: string;
+  title: string;
+}
+
+/**
+ * Notify conversation participants that a party / watch-together session started.
+ * Uses a notification message so it appears in the tray when the app is backgrounded.
+ */
+export async function sendActivityPartyPush(
+  fcmToken: string,
+  payload: ActivityPartyPushPayload,
+): Promise<void> {
+  const app = getApp();
+  if (!app) return;
+
+  const body =
+    payload.adapter === 'screen_share'
+      ? `${payload.displayName} started a screen share party`
+      : `${payload.displayName} started Watch Together`;
+
+  try {
+    await app.messaging().send({
+      token: fcmToken,
+      notification: {
+        title: payload.title,
+        body,
+      },
+      data: {
+        type: 'activity_party_started',
+        activity_id: payload.activityId,
+        adapter: payload.adapter,
+        scope_type: payload.scopeType,
+        scope_id: payload.scopeId,
+        group_id: payload.groupId ?? '',
+        other_user_id: payload.otherUserId ?? '',
+        from_user_id: payload.fromUserId,
+        display_name: payload.displayName,
+        handle: payload.handle,
+        title: payload.title,
+      },
+      android: {
+        priority: 'high',
+        notification: { channelId: 'activity_alerts' },
+      },
+      apns: {
+        payload: { aps: { sound: 'default' } },
+      },
+    });
+    logger.debug('FCM', `Activity party push sent → ${payload.activityId}`);
+  } catch (err: any) {
+    logger.warn('FCM', `Activity party push failed: ${err?.message}`);
+  }
+}
+
+/**
+ * Issue a Firebase custom auth token so the mobile client can read RTDB paths
+ * gated by auth.uid (activities, calls).
+ */
+export async function createFirebaseCustomToken(userId: string): Promise<string | null> {
+  const app = getApp();
+  if (!app) return null;
+  try {
+    return await admin.auth().createCustomToken(userId);
+  } catch (err: any) {
+    logger.warn('Firebase', `createCustomToken failed: ${err?.message}`);
+    return null;
+  }
+}
+
 export async function sendIncomingCallPush(
   fcmToken: string,
   payload:  IncomingCallPayload,

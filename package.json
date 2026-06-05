@@ -5,15 +5,13 @@
   "workspaces": [
     "api",
     "business-api",
-    "signaling",
     "worker",
     "shared"
   ],
   "scripts": {
-    "dev": "concurrently \"npm run dev --workspace=api\" \"npm run dev --workspace=business-api\" \"npm run dev --workspace=signaling\" \"npm run dev --workspace=worker\"",
+    "dev": "concurrently \"npm run dev --workspace=api\" \"npm run dev --workspace=business-api\" \"npm run dev --workspace=worker\"",
     "dev:business-api": "npm run dev --workspace=business-api",
     "dev:api": "npm run dev --workspace=api",
-    "dev:signaling": "npm run dev --workspace=signaling",
     "dev:worker": "npm run dev --workspace=worker",
     "db:migrate": "npm run migrate --workspace=api",
     "db:seed": "npm run seed --workspace=api",

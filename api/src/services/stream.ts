@@ -302,19 +302,34 @@ export async function createGroupChannel(
   const allMembers = [...new Set([creatorId, ...memberIds])];
   const ch = sc.channel('messaging', channelId, {
     created_by_id: creatorId,
-    members: allMembers,
+    members: allMembers.map((uid) => ({
+      user_id: uid,
+      channel_role: uid === creatorId ? 'channel_moderator' : 'channel_member',
+    })),
     ...({ name, is_group: true, ...(avatarUrl ? { image: avatarUrl } : {}) } as any),
   });
   await ch.create();
-  // Grant admin role to creator
-  await ch.addMembers([{ user_id: creatorId, channel_role: 'channel_admin' as any }]);
 }
 
-/** Add one user to an existing group channel (member role). */
+/** Add one user to an existing group channel. */
 export async function addGroupMember(channelId: string, userId: string, asAdmin = false): Promise<void> {
   const sc = getStreamClient();
   const ch = sc.channel('messaging', channelId);
-  await ch.addMembers([{ user_id: userId, channel_role: (asAdmin ? 'channel_admin' : 'channel_member') as any }]);
+  await ch.addMembers([{
+    user_id: userId,
+    channel_role: asAdmin ? 'channel_moderator' : 'channel_member',
+  }]);
+}
+
+/** Promote or demote an existing group member in Stream. */
+export async function setGroupMemberRole(channelId: string, userId: string, asAdmin: boolean): Promise<void> {
+  const sc = getStreamClient();
+  const ch = sc.channel('messaging', channelId);
+  if (asAdmin) {
+    await ch.addModerators([userId]);
+  } else {
+    await ch.demoteModerators([userId]);
+  }
 }
 
 /** Remove a user from a group channel. */

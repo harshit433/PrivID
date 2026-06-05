@@ -20,6 +20,7 @@ import {
   CHAT_UNKNOWN_TOTAL_LIMIT,
   createGroupChannel,
   addGroupMember,
+  setGroupMemberRole,
   removeGroupMember,
   updateGroupChannel,
   deleteGroupChannel,
@@ -345,6 +346,11 @@ chatRouter.post('/groups', requireAuth, async (req: Request, res: Response, next
     try {
       await createGroupChannel(channelId, name, creatorId, member_ids, avatar_url);
     } catch (streamErr) {
+      logger.error('stream', 'Group channel creation failed', {
+        err: streamErr instanceof Error ? streamErr.message : String(streamErr),
+        groupId,
+        channelId,
+      });
       // Compensate: remove the DB rows since Stream channel doesn't exist
       await query(`DELETE FROM group_channels WHERE group_id = $1`, [groupId]).catch(() => {});
       throw new AppError(503, 'STREAM_ERROR', 'Failed to create group chat. Please try again.');
@@ -608,7 +614,7 @@ chatRouter.patch('/groups/:groupId/members/:targetUserId/role', requireAuth, asy
 
     const channelId = group.channel_cid.replace('messaging:', '');
     await Promise.all([
-      addGroupMember(channelId, targetUserId, role === 'admin'),
+      setGroupMemberRole(channelId, targetUserId, role === 'admin'),
       query(
         `UPDATE group_members SET role = $1 WHERE group_id = $2 AND user_id = $3`,
         [role, groupId, targetUserId],

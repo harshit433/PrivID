@@ -239,8 +239,8 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
 
     const [call] = await withTransaction(async (client) => {
       const { rows } = await client.query<CallRow>(
-        `INSERT INTO calls (caller_id, callee_id, call_type, channel_id, webrtc_room_id)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO calls (caller_id, callee_id, call_type, channel_id, webrtc_room_id, status)
+         VALUES ($1, $2, $3, $4, $5, 'ringing')
          RETURNING *`,
         [callerId, calleeId, callType, channelId, webrtcRoomId]
       );
@@ -270,6 +270,32 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
 
     // ── RTDB: write initial call state (fire-and-forget) ─────────────────────
     rtdbCreateCall(call.call_id, callerId, calleeId).catch(() => {});
+
+    // ── Server-side ring timeout (45s) ───────────────────────────────────────
+    const ringTimeoutCallId = call.call_id;
+    setTimeout(() => {
+      (async () => {
+        try {
+          const stillRinging = await queryOne<CallRow>(
+            `SELECT * FROM calls
+              WHERE call_id = $1
+                AND status IN ('initiated', 'ringing')`,
+            [ringTimeoutCallId],
+          );
+          if (!stillRinging) return;
+          await queryOne<CallRow>(
+            `UPDATE calls SET status = 'missed', ended_at = NOW()
+              WHERE call_id = $1
+              RETURNING *`,
+            [ringTimeoutCallId],
+          );
+          await rtdbUpdateStatus(ringTimeoutCallId, 'missed');
+          logger.debug('calls', `Ring timeout — call ${ringTimeoutCallId} marked missed`);
+        } catch (err: any) {
+          logger.warn('calls', 'Ring timeout error:', err?.message);
+        }
+      })();
+    }, 45_000);
 
     // ── FCM push to callee ────────────────────────────────────────────────────
     // Single query: get caller info + callee's FCM token + connection type

@@ -648,6 +648,13 @@ async function verifyDeviceIntegrityToken(
 trustRouter.post('/verify/liveness/initiate', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const configured = isLivenessConfigured();
+    if (!configured) {
+      throw new AppError(
+        503,
+        'LIVENESS_UNAVAILABLE',
+        'Liveness verification is not available right now. Please try again later.',
+      );
+    }
     const providerRef = crypto.randomUUID();
 
     await query(
@@ -676,28 +683,15 @@ trustRouter.post('/verify/liveness/initiate', requireAuth, async (req: Request, 
 });
 
 // ─── POST /trust/verify/liveness/skip ─────────────────────────────────────────
-// Optional onboarding step — marks liveness as skipped (no trust points).
+// Disabled — liveness is mandatory during onboarding.
 
-trustRouter.post('/verify/liveness/skip', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+trustRouter.post('/verify/liveness/skip', requireAuth, async (_req: Request, _res: Response, next: NextFunction) => {
   try {
-    await query(
-      `INSERT INTO trust_factors (user_id, factor_type, status, provider, score_delta, metadata, verified_at)
-       VALUES ($1, 'liveness_check', 'expired', 'skipped', 0, $2::jsonb, NULL)
-       ON CONFLICT (user_id, factor_type) WHERE is_latest = TRUE
-       DO UPDATE SET
-         status = 'expired',
-         provider = 'skipped',
-         score_delta = 0,
-         provider_ref = NULL,
-         metadata = EXCLUDED.metadata,
-         verified_at = NULL`,
-      [req.user!.sub, JSON.stringify({ skipped: true, optional: true })],
+    throw new AppError(
+      403,
+      'LIVENESS_REQUIRED',
+      'Liveness check is required and cannot be skipped.',
     );
-    const breakdown = await recomputeAndPersist(req.user!.sub);
-    res.json({
-      ok: true,
-      data: { score: breakdown.total, tier: breakdown.tier, skipped: true },
-    });
   } catch (err) {
     next(err);
   }
@@ -729,35 +723,33 @@ trustRouter.post('/verify/liveness/complete', requireAuth, async (req: Request, 
       return res.json({ ok: true, data: { score: breakdown.total, tier: breakdown.tier, already_verified: true } });
     }
 
-    const configured = isLivenessConfigured();
-    let passed: boolean;
-    let score: number;
-
-    if (configured) {
-      if (!image) throw new AppError(400, 'IMAGE_REQUIRED', 'No selfie was provided for the liveness check.');
-      const b64 = image.includes(',') ? image.slice(image.indexOf(',') + 1) : image;
-      const buf = Buffer.from(b64, 'base64');
-      if (buf.length < 1024) throw new AppError(400, 'IMAGE_INVALID', 'The captured selfie was empty. Please try again.');
-
-      const result = await checkLiveness(buf).catch((err: Error) => {
-        logger.error('liveness', 'Luxand check failed', { error: err.message });
-        throw new AppError(
-          502,
-          'LIVENESS_CHECK_FAILED',
-          'Liveness verification is temporarily unavailable. Please try again.',
-        );
-      });
-      score = result.score;
-      passed = result.real;
-      logger.debug(
-        'liveness',
-        `complete ref=${provider_ref} score=${score} threshold=${livenessThreshold()} passed=${passed}`,
+    if (!isLivenessConfigured()) {
+      throw new AppError(
+        503,
+        'LIVENESS_UNAVAILABLE',
+        'Liveness verification is not available right now. Please try again later.',
       );
-    } else {
-      // Dev bypass — no provider token configured.
-      score = 1;
-      passed = true;
     }
+
+    if (!image) throw new AppError(400, 'IMAGE_REQUIRED', 'No selfie was provided for the liveness check.');
+    const b64 = image.includes(',') ? image.slice(image.indexOf(',') + 1) : image;
+    const buf = Buffer.from(b64, 'base64');
+    if (buf.length < 1024) throw new AppError(400, 'IMAGE_INVALID', 'The captured selfie was empty. Please try again.');
+
+    const result = await checkLiveness(buf).catch((err: Error) => {
+      logger.error('liveness', 'Luxand check failed', { error: err.message });
+      throw new AppError(
+        502,
+        'LIVENESS_CHECK_FAILED',
+        'Liveness verification is temporarily unavailable. Please try again.',
+      );
+    });
+    const score = result.score;
+    const passed = result.real;
+    logger.debug(
+      'liveness',
+      `complete ref=${provider_ref} score=${score} threshold=${livenessThreshold()} passed=${passed}`,
+    );
 
     if (!passed) {
       await query(

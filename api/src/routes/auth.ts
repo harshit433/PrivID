@@ -864,6 +864,7 @@ authRouter.post('/complete-onboarding', requireAuth, async (req: Request, res: R
     const required: Array<{ type: string; label: string }> = [
       { type: 'phone_verified', label: 'Phone verification' },
       { type: 'device_integrity', label: 'Device verification' },
+      { type: 'liveness_check', label: 'Liveness check' },
     ];
     for (const step of required) {
       if (byType[step.type] !== 'completed') {

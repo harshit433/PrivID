@@ -45,6 +45,9 @@ COPY db ./db
 COPY docker/api-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+WORKDIR /app
+RUN npm run build --workspace=@trustroute/shared
+
 WORKDIR /app/api
 RUN npm run build
 

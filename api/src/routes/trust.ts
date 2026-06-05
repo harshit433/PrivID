@@ -394,7 +394,7 @@ async function completeDeviceRegistration(
 ): Promise<{ score: number; tier: string }> {
   if (process.env.NODE_ENV === 'production') {
     try {
-      const ok = await getRedis().get(`integrity_verified:${userId}`);
+      const ok = await getRedis().getdel(`integrity_verified:${userId}`);
       if (!ok) {
         throw new AppError(
           400,
@@ -419,7 +419,11 @@ async function completeDeviceRegistration(
       `INSERT INTO device_registrations
          (user_id, platform, integrity_token, push_token, hardware_id, device_fingerprint)
        VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT DO NOTHING`,
+       ON CONFLICT (user_id, hardware_id) DO UPDATE
+         SET device_fingerprint = EXCLUDED.device_fingerprint,
+             push_token = COALESCE(EXCLUDED.push_token, device_registrations.push_token),
+             integrity_token = EXCLUDED.integrity_token,
+             last_seen_at = NOW()`,
       [
         userId,
         body.platform,
@@ -428,13 +432,6 @@ async function completeDeviceRegistration(
         body.hardware_id,
         body.device_fingerprint ?? null,
       ],
-    );
-
-    await client.query(
-      `UPDATE device_registrations
-       SET device_fingerprint = $3, push_token = COALESCE($4, push_token), last_seen_at = NOW()
-       WHERE user_id = $1 AND hardware_id = $2`,
-      [userId, body.hardware_id, body.device_fingerprint ?? null, body.push_token ?? null],
     );
 
     await client.query(
@@ -515,6 +512,10 @@ trustRouter.post('/verify/device', requireAuth, async (req: Request, res: Respon
     const body = deviceVerifySchema.parse(req.body);
 
     // ── 1. Nonce validation ───────────────────────────────────────────────────
+    if (process.env.NODE_ENV === 'production' && !body.nonce) {
+      throw new AppError(400, 'NONCE_REQUIRED', 'Integrity nonce is required. Use the step-based verification endpoints.');
+    }
+
     if (body.nonce) {
       const redis = getRedis();
       const nonceKey = `integrity_nonce:${req.user!.sub}:${body.nonce}`;

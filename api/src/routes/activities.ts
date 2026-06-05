@@ -434,22 +434,33 @@ activitiesRouter.post('/sessions/:id/join', requireAuth, async (req: Request, re
 activitiesRouter.post('/sessions/:id/leave', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.sub;
-    const row = await getActivity(req.params.id);
-    await assertActivityAccess(row, userId);
+    const activityId = req.params.id;
+
+    // Pre-check access without a lock (fast path — access doesn't change during leave)
+    const preCheck = await getActivity(activityId);
+    await assertActivityAccess(preCheck, userId);
     const user = await getUserLite(userId);
 
-    const updated = await withTransaction(async (client) => {
+    const { updated, ended } = await withTransaction(async (client) => {
+      // Re-fetch with row lock to serialize concurrent leaves
+      const { rows: locked } = await client.query<ActivityRow>(
+        `SELECT * FROM activity_sessions WHERE activity_id = $1 FOR UPDATE`,
+        [activityId]
+      );
+      if (!locked[0]) throw new AppError(404, 'ACTIVITY_NOT_FOUND', 'Activity session not found.');
+      const row = locked[0];
+
       await client.query(
         `UPDATE activity_participants SET left_at = NOW()
           WHERE activity_id = $1 AND user_id = $2`,
-        [row.activity_id, userId],
+        [activityId, userId]
       );
 
       const { rows: active } = await client.query<{ user_id: string }>(
         `SELECT user_id FROM activity_participants
           WHERE activity_id = $1 AND left_at IS NULL
           ORDER BY joined_at ASC`,
-        [row.activity_id],
+        [activityId]
       );
 
       if (active.length === 0) {
@@ -458,9 +469,9 @@ activitiesRouter.post('/sessions/:id/leave', requireAuth, async (req: Request, r
               SET status = 'ended', ended_at = NOW()
             WHERE activity_id = $1
             RETURNING *`,
-          [row.activity_id],
+          [activityId]
         );
-        return rows[0];
+        return { updated: rows[0], ended: true };
       }
 
       const nextController = active.some((p) => p.user_id === row.controller_user_id)
@@ -480,36 +491,36 @@ activitiesRouter.post('/sessions/:id/leave', requireAuth, async (req: Request, r
                 presenter_user_id = $3
           WHERE activity_id = $4
           RETURNING *`,
-        [nextHost, nextController, nextPresenter, row.activity_id],
+        [nextHost, nextController, nextPresenter, activityId]
       );
       await client.query(
         `UPDATE activity_participants
             SET role = CASE WHEN user_id = $1 THEN 'host' ELSE 'participant' END
           WHERE activity_id = $2`,
-        [nextHost, row.activity_id],
+        [nextHost, activityId]
       );
-      return rows[0];
+      return { updated: rows[0], ended: false };
     });
 
-    await rtdbUpdateActivityParticipant(row.activity_id, {
+    await rtdbUpdateActivityParticipant(activityId, {
       user_id: user.user_id,
       handle: user.handle,
       display_name: user.display_name ?? user.handle,
       avatar_url: user.avatar_url,
-      role: row.host_user_id === userId ? 'host' : 'participant',
+      role: preCheck.host_user_id === userId ? 'host' : 'participant',
     }, false);
 
-    if (updated.status === 'ended') {
-      await rtdbEndActivitySession(row.activity_id);
+    if (ended) {
+      await rtdbEndActivitySession(activityId);
     } else {
-      await rtdbUpdateActivityControl(row.activity_id, {
+      await rtdbUpdateActivityControl(activityId, {
         host_user_id: updated.host_user_id,
         controller_user_id: updated.controller_user_id,
         presenter_user_id: updated.presenter_user_id,
       });
     }
 
-    res.json({ ok: true, data: serializeActivity(updated, await getParticipants(row.activity_id)) });
+    res.json({ ok: true, data: serializeActivity(updated, await getParticipants(activityId)) });
   } catch (err) {
     next(err);
   }

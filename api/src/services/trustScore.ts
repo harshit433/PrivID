@@ -333,40 +333,11 @@ export async function bulkComputeScores(userIds: string[]): Promise<Array<{
 // ─── Persist recomputed score + trigger review ────────────────────────────────
 
 export async function recomputeAndPersist(userId: string): Promise<TrustBreakdown> {
-  // Recompute is on the hot path for verification flows. To avoid blocking user
-  // actions on slow ML calls, we reuse the last known ML modifier when available
-  // and only call ML when we have no cached score at all.
-  let cached: TrustBreakdown | null = null;
-  try {
-    const raw = await getRedis().get(keys.trustScore(userId));
-    cached = raw ? (JSON.parse(raw) as TrustBreakdown) : null;
-  } catch {
-    cached = null;
-  }
-
-  // Clear cache so subsequent reads get updated verification points. We'll write
-  // a fresh cache entry below.
+  // Invalidate cache so computeTrustScore gets fresh ML data
   await invalidateTrustScoreCache(userId);
 
-  let breakdown: TrustBreakdown;
-  if (cached) {
-    const verif = await computeVerificationPoints(userId);
-    const ml_modifier = cached.factors?.ml_modifier ?? 0;
-    const total = clampScore(verif.total + ml_modifier);
-    breakdown = {
-      total,
-      tier: scoreToTier(total),
-      factors: {
-        ...verif.factors,
-        ml_modifier,
-      },
-      ml: cached.ml,
-    };
-    // Refresh cache (best-effort).
-    getRedis().setex(keys.trustScore(userId), TRUST_SCORE_TTL_S, JSON.stringify(breakdown)).catch(() => {});
-  } else {
-    breakdown = await computeTrustScore(userId);
-  }
+  // Compute fresh score (cache miss → calls ML service)
+  const breakdown = await computeTrustScore(userId);
 
   await withTransaction(async (client) => {
     const { rows } = await client.query<UserRow>(

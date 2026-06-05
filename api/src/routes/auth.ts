@@ -139,7 +139,7 @@ function getPrivateKey(): string {
 }
 
 function generateOtp(): string {
-  return Math.floor(100000 + Math.random() * 900000).toString();
+  return crypto.randomInt(100_000, 1_000_000).toString();
 }
 
 function hashToken(token: string): string {
@@ -248,15 +248,17 @@ authRouter.post('/register/verify', async (req: Request, res: Response, next: Ne
     const phone_hash = crypto.createHash('sha256').update(session.phone_e164).digest('hex');
 
     const user = await withTransaction(async (client) => {
-      // Upsert user (phone already registered = login flow)
       const { rows } = await client.query<UserRow>(
         `INSERT INTO users (phone_e164, phone_hash, handle, display_name)
          VALUES ($1, $2, $3, $4)
-         ON CONFLICT (phone_e164) DO UPDATE
-           SET updated_at = NOW()
+         ON CONFLICT (phone_e164) DO NOTHING
          RETURNING *`,
         [session.phone_e164, phone_hash, handle, display_name ?? handle]
       );
+      // If rows is empty, this phone is already registered — route to login instead
+      if (!rows[0]) {
+        throw new AppError(409, 'PHONE_REGISTERED', 'This number is already registered. Please log in instead.');
+      }
       return rows[0];
     });
 
@@ -403,10 +405,20 @@ authRouter.post('/token/refresh', async (req: Request, res: Response, next: Next
 
     const tokenHash = hashToken(refresh_token);
     const stored = await queryOne<RefreshTokenRow>(
-      `SELECT * FROM refresh_tokens WHERE token_hash = $1 AND revoked = FALSE`,
+      `SELECT * FROM refresh_tokens WHERE token_hash = $1`,
       [tokenHash]
     );
-    if (!stored) throw new AppError(401, 'INVALID_TOKEN', 'Refresh token not found or revoked.');
+    if (!stored) {
+      throw new AppError(401, 'INVALID_TOKEN', 'Refresh token not found or expired.');
+    }
+    if (stored.revoked) {
+      // Token was already revoked — possible theft. Revoke all sessions for this user.
+      await query(
+        `UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1`,
+        [stored.user_id]
+      );
+      throw new AppError(401, 'SESSION_INVALID', 'Your session has been invalidated for security reasons. Please sign in again.');
+    }
     if (new Date() > stored.expires_at) throw new AppError(401, 'TOKEN_EXPIRED', 'Refresh token expired.');
 
     // Rotate: revoke old, issue new
@@ -879,8 +891,8 @@ authRouter.post('/logout', requireAuth, async (req: Request, res: Response, next
   try {
     const { refresh_token } = z.object({ refresh_token: z.string() }).parse(req.body);
     await query(
-      `UPDATE refresh_tokens SET revoked = TRUE WHERE token_hash = $1`,
-      [hashToken(refresh_token)]
+      `UPDATE refresh_tokens SET revoked = TRUE WHERE token_hash = $1 AND user_id = $2`,
+      [hashToken(refresh_token), req.user!.sub]
     );
     res.json({ ok: true, data: null });
   } catch (err) {

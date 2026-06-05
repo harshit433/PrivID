@@ -11,6 +11,7 @@
  */
 
 import { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import fs from 'fs';
 import path from 'path';
@@ -108,15 +109,20 @@ export function requireAuth(req: Request, _res: Response, next: NextFunction) {
  * Used for internal admin endpoints (ML feedback, review resolution).
  * NOT a user-facing route — never returns JWT-specific errors.
  */
-export function requireAdmin(req: Request, _res: Response, next: NextFunction) {
+export function requireAdmin(req: Request, res: Response, next: NextFunction) {
   const key = req.headers['x-admin-key'];
   const adminKey = process.env.ADMIN_API_KEY;
 
   if (!adminKey) {
     return next(new AppError(503, 'ADMIN_NOT_CONFIGURED', 'Admin key not configured.'));
   }
-  if (!key || key !== adminKey) {
-    return next(new AppError(401, 'UNAUTHORIZED', 'Admin access required.'));
+  if (!key || !adminKey) {
+    return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Admin access denied.' } });
+  }
+  const keyBuf = Buffer.from(key as string);
+  const adminBuf = Buffer.from(adminKey);
+  if (keyBuf.length !== adminBuf.length || !crypto.timingSafeEqual(keyBuf, adminBuf)) {
+    return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Admin access denied.' } });
   }
   next();
 }

@@ -23,7 +23,7 @@ services:
       - api/.env.production
     environment:
       DATABASE_URL: postgresql://trustroute:${POSTGRES_PASSWORD}@postgres:5432/privid
-      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379
       JWT_PRIVATE_KEY_PATH: /app/api/keys/private.pem
       JWT_PUBLIC_KEY_PATH: /app/api/keys/public.pem
       NODE_ENV: production
@@ -48,7 +48,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: trustroute
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: privid
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -74,7 +74,7 @@ services:
       - api/.env.production
     environment:
       DATABASE_URL: postgresql://trustroute:${POSTGRES_PASSWORD}@postgres:5432/privid
-      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379
       BUSINESS_API_PORT: 3002
       NODE_ENV: production
   worker:
@@ -89,7 +89,7 @@ services:
       - api/.env.production
     environment:
       DATABASE_URL: postgresql://trustroute:${POSTGRES_PASSWORD}@postgres:5432/privid
-      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379
       NODE_ENV: production
     depends_on:
       postgres:
@@ -101,11 +101,11 @@ services:
     image: redis:7-alpine
     container_name: trustroute_redis
     restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASSWORD:-changeme}
+    command: redis-server --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ['CMD', 'redis-cli', '-a', '${REDIS_PASSWORD:-changeme}', 'ping']
+      test: ['CMD-SHELL', 'redis-cli -a "$$REDIS_PASSWORD" ping']
       interval: 10s
       timeout: 5s
       retries: 5

@@ -1,7 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { z } from 'zod';
-import { query, queryOne } from '@trustroute/shared';
+import { query, queryOne, withTransaction } from '@trustroute/shared';
 import type { ConnectionType } from '@trustroute/shared';
 import { logger } from '../utils/logger';
 import { requireAuth } from '../middleware/auth';
@@ -303,35 +303,52 @@ chatRouter.post('/groups', requireAuth, async (req: Request, res: Response, next
     const channelCid = `messaging:${channelId}`;
     const allMemberIds = [...new Set([creatorId, ...member_ids])];
 
-    // Verify all members exist and are active
-    for (const uid of member_ids) {
-      const exists = await queryOne<{ user_id: string }>(
-        `SELECT user_id FROM users WHERE user_id = $1 AND is_active = TRUE`, [uid],
-      );
-      if (!exists) throw new AppError(400, 'MEMBER_NOT_FOUND', `User ${uid} not found.`);
+    // Verify all members exist and are active (single batch query — no N+1)
+    const foundMembers = await query<{ user_id: string }>(
+      `SELECT user_id FROM users WHERE user_id = ANY($1::uuid[]) AND is_active = TRUE`,
+      [member_ids],
+    );
+    if (foundMembers.length !== member_ids.length) {
+      const foundIds = new Set(foundMembers.map((r) => r.user_id));
+      const missing = member_ids.find((uid) => !foundIds.has(uid));
+      throw new AppError(400, 'MEMBER_NOT_FOUND', `User ${missing} not found or inactive.`);
     }
 
-    // Upsert all members into Stream so they can receive messages
+    // Upsert all members into Stream so they can receive messages (before DB/Stream channel writes)
     const memberRows = await query<{ user_id: string; handle: string; display_name: string | null; avatar_url: string | null }>(
       `SELECT user_id, handle, display_name, avatar_url FROM users WHERE user_id = ANY($1)`,
       [allMemberIds],
     );
     await Promise.all(memberRows.map((u) => upsertStreamUser(u)));
 
-    // Create Stream channel
-    await createGroupChannel(channelId, name, creatorId, member_ids, avatar_url);
+    // 1. Persist to DB first (can be compensated on Stream failure)
+    await withTransaction(async (client) => {
+      await client.query(
+        `INSERT INTO group_channels (group_id, channel_cid, name, description, avatar_url, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [groupId, channelCid, name, null, avatar_url ?? null, creatorId],
+      );
+      await client.query(
+        `INSERT INTO group_members (group_id, user_id, role)
+         SELECT $1, unnest($2::uuid[]), 'member'
+         ON CONFLICT DO NOTHING`,
+        [groupId, allMemberIds],
+      );
+      // Set creator as admin
+      await client.query(
+        `UPDATE group_members SET role = 'admin' WHERE group_id = $1 AND user_id = $2`,
+        [groupId, creatorId],
+      );
+    });
 
-    // Persist group + members to DB
-    await query(
-      `INSERT INTO group_channels (group_id, channel_cid, name, avatar_url, created_by)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [groupId, channelCid, name, avatar_url ?? null, creatorId],
-    );
-    await query(
-      `INSERT INTO group_members (group_id, user_id, role)
-       SELECT $1, unnest($2::uuid[]), unnest($3::text[])`,
-      [groupId, allMemberIds, allMemberIds.map((id) => (id === creatorId ? 'admin' : 'member'))],
-    );
+    // 2. Create Stream channel after DB committed (Stream is not transactional)
+    try {
+      await createGroupChannel(channelId, name, creatorId, member_ids, avatar_url);
+    } catch (streamErr) {
+      // Compensate: remove the DB rows since Stream channel doesn't exist
+      await query(`DELETE FROM group_channels WHERE group_id = $1`, [groupId]).catch(() => {});
+      throw new AppError(503, 'STREAM_ERROR', 'Failed to create group chat. Please try again.');
+    }
 
     res.status(201).json({
       ok: true,

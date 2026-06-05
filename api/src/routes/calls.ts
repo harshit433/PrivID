@@ -82,11 +82,15 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
     } else {
       calleeId = body.callee_id!;
 
+      if (calleeId === callerId) {
+        throw new AppError(400, 'SELF_CALL', 'You cannot call yourself.');
+      }
+
       // Fetch caller status + callee connection/settings in one parallel round-trip.
       // All three queries are independent of each other — no reason to run serially.
       // callerConn (the caller's OWN record toward this callee) is only needed when
       // the caller has an active restriction; it's fetched separately below only then.
-      const [callerStatus, calleeConn, calleeUser] = await Promise.all([
+      const [callerStatus, calleeConn, calleeUser, callerToCalleeConn] = await Promise.all([
         queryOne<{ is_under_review: boolean; call_restriction_until: Date | null }>(
           `SELECT is_under_review, call_restriction_until FROM users WHERE user_id = $1`,
           [callerId],
@@ -98,6 +102,10 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
         queryOne<{ discovery_mode: string }>(
           `SELECT discovery_mode FROM users WHERE user_id = $1`,
           [calleeId],
+        ),
+        queryOne<{ connection_type: string }>(
+          `SELECT connection_type FROM connections WHERE owner_id = $1 AND contact_id = $2`,
+          [callerId, calleeId],
         ),
       ]);
 
@@ -153,9 +161,14 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
         throw new AppError(403, 'DISCOVERY_PRIVATE', 'This person is not accepting calls from unknown contacts.');
       }
 
-      // Hard block
+      // Hard block — callee blocked caller
       if (connType === 'blocked') {
         throw new AppError(403, 'CALLER_BLOCKED', 'You cannot call this person.');
+      }
+
+      // Hard block — caller blocked callee
+      if (callerToCalleeConn?.connection_type === 'blocked') {
+        throw new AppError(403, 'CALL_BLOCKED', 'You cannot call someone you have blocked.');
       }
 
       // Temporary — expired access
@@ -220,10 +233,6 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
           }
         }
       }
-    }
-
-    if (calleeId === callerId) {
-      throw new AppError(400, 'SELF_CALL', 'Cannot call yourself.');
     }
 
     const webrtcRoomId = crypto.randomBytes(16).toString('base64url');
@@ -323,23 +332,24 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
 callsRouter.post('/:id/answer', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const call = await queryOne<CallRow>(
-      `SELECT * FROM calls WHERE call_id = $1 AND callee_id = $2`,
+      `UPDATE calls
+          SET status = 'answered', started_at = NOW()
+        WHERE call_id = $1
+          AND callee_id = $2
+          AND status IN ('initiated', 'ringing')
+        RETURNING *`,
       [req.params.id, req.user!.sub]
     );
-    if (!call) throw new AppError(404, 'CALL_NOT_FOUND', 'Call not found.');
-    if (call.status !== 'initiated' && call.status !== 'ringing') {
-      throw new AppError(409, 'CALL_NOT_RINGING', 'Call is not in a ringing state.');
-    }
 
-    const [updated] = await query<CallRow>(
-      `UPDATE calls SET status = 'answered', started_at = NOW() WHERE call_id = $1 RETURNING *`,
-      [req.params.id]
-    );
+    if (!call) {
+      // Either doesn't exist, wrong callee, or already answered/ended
+      throw new AppError(409, 'CALL_NOT_ANSWERABLE', 'Call is no longer available.');
+    }
 
     // Signal caller instantly — their OutboundCallingScreen transitions to active
     rtdbUpdateStatus(req.params.id, 'answered').catch(() => {});
 
-    res.json({ ok: true, data: { call_id: updated.call_id, status: updated.status, webrtc_room_id: updated.webrtc_room_id } });
+    res.json({ ok: true, data: { call_id: call.call_id, status: call.status, webrtc_room_id: call.webrtc_room_id } });
   } catch (err) {
     next(err);
   }
@@ -366,13 +376,19 @@ callsRouter.post('/:id/end', requireAuth, async (req: Request, res: Response, ne
 
     const finalStatus = call.status === 'answered' ? 'ended' : reason;
 
-    const [updated] = await query<CallRow>(
+    const updatedCall = await queryOne<CallRow>(
       `UPDATE calls
        SET status = $1, ended_at = NOW(), duration_seconds = $2
        WHERE call_id = $3
+         AND status NOT IN ('ended', 'declined', 'missed', 'failed')
        RETURNING *`,
       [finalStatus, durationSeconds, req.params.id]
     );
+
+    if (!updatedCall) {
+      throw new AppError(409, 'CALL_ALREADY_ENDED', 'Call has already ended.');
+    }
+    const updated = updatedCall;
 
     // ── RTDB: signal the other device instantly ───────────────────────────────
     // This fires in < 100ms on the other device's active listener.

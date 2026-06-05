@@ -60,7 +60,12 @@ export function startMassOutreachWorker() {
         await trustRecomputeQueue.add(
           'recompute',
           { user_id, reason: 'mass_outreach_flag' },
-          { priority: 1 }
+          {
+            jobId: `trust-${user_id}-outreach`,
+            priority: 1,
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 2000 },
+          }
         );
       }
     },

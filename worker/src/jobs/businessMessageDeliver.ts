@@ -46,7 +46,7 @@ async function deliverMessage(messageId: string) {
     return;
   }
 
-  if (msg.status === 'sent' || msg.status === 'failed') return;
+  if (msg.status !== 'queued') return;
 
   const scheduled = await queryOne<{ ready: boolean }>(
     `SELECT (scheduled_at IS NULL OR scheduled_at <= NOW()) AS ready

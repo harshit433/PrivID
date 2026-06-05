@@ -44,7 +44,24 @@ const JSON_LIMIT = process.env.EXPRESS_JSON_LIMIT ?? '15mb';
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(helmet());
-app.use(cors({ origin: true, credentials: true }));
+
+const ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS ?? '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Mobile apps send no Origin header — always allow
+    if (!origin) return callback(null, true);
+    // In dev, allow everything
+    if (process.env.NODE_ENV !== 'production') return callback(null, true);
+    // In prod, require explicit allowlist via env var
+    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    callback(new Error(`CORS: origin ${origin} not allowed`));
+  },
+  credentials: true,
+}));
 // Capture the raw body so the Stream chat webhook can verify its HMAC signature.
 app.use(express.json({
   limit: JSON_LIMIT,
@@ -158,7 +175,7 @@ app.use('/liveness', livenessRouter);
 // Shadow trust: observe + query shadow scores for non-TrustRoute numbers
 app.use('/numbers', apiLimiter, numbersRouter);
 // Admin: internal-only, gated by x-admin-key (should be behind VPN in prod)
-app.use('/admin', adminRouter);
+app.use('/admin', publicLimiter, adminRouter);
 // Business suite (API key auth) — same routes as business-api :3002
 mountBusinessSuite(app);
 if (process.env.NODE_ENV !== 'production') {

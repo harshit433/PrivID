@@ -24,6 +24,8 @@ import {
   computeVerificationPoints,
   scoreToTier,
   clampScore,
+  getRedis,
+  keys,
 } from '@trustroute/shared';
 import type { UserRow, TrustTier } from '@trustroute/shared';
 import type { TrustRecomputeJob } from '../queues';
@@ -171,6 +173,11 @@ export function startTrustRecomputeWorker() {
       const result = await recomputeUser(user_id, reason);
 
       if (result) {
+        // Keep API reads consistent: invalidate trust-score cache after worker writes.
+        try {
+          await getRedis().del(keys.trustScore(user_id));
+        } catch { /* Redis down — cache miss will recompute */ }
+
         const changed =
           result.old_score !== result.new_score ||
           result.old_tier  !== result.new_tier;

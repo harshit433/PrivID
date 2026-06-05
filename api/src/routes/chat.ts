@@ -188,6 +188,10 @@ chatRouter.post('/webhook', async (req: Request, res: Response) => {
     const signature = req.headers['x-signature'] as string | undefined;
     const rawBody = (req as any).rawBody as Buffer | undefined;
     const sc = getStreamClient();
+    const requireSignature = process.env.NODE_ENV === 'production';
+    if (requireSignature && (!signature || !rawBody)) {
+      return res.status(401).json({ error: 'missing signature' });
+    }
     if (signature && rawBody && !sc.verifyWebhook(rawBody.toString(), signature)) {
       return res.status(401).json({ error: 'invalid signature' });
     }
@@ -252,9 +256,27 @@ chatRouter.post('/webhook', async (req: Request, res: Response) => {
 
     return res.status(200).json({});
   } catch (err: any) {
-    logger.warn('chat/webhook', 'Internal error — failing open', { error: err?.message });
-    // Fail open — never block delivery due to an internal error.
-    return res.status(200).json({});
+    const failClosed = process.env.NODE_ENV === 'production';
+    logger.warn('chat/webhook', failClosed ? 'Internal error — failing closed' : 'Internal error — failing open', {
+      error: err?.message,
+    });
+
+    if (!failClosed) return res.status(200).json({});
+
+    // Fail closed in production — never allow delivery when the gate is uncertain.
+    // If we have a message payload, echo it back with type "error" so Stream rejects it.
+    const body = (req as any).body ?? {};
+    const message = body.message;
+    if (message && message.id) {
+      return res.status(200).json({
+        message: {
+          ...message,
+          type: 'error',
+          text: 'Message could not be verified right now. Please try again.',
+        },
+      });
+    }
+    return res.status(401).json({ error: 'verification failed' });
   }
 });
 

@@ -23,7 +23,7 @@ services:
       - api/.env.production
     environment:
       DATABASE_URL: postgresql://trustroute:${POSTGRES_PASSWORD}@postgres:5432/privid
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379
       JWT_PRIVATE_KEY_PATH: /app/api/keys/private.pem
       JWT_PUBLIC_KEY_PATH: /app/api/keys/public.pem
       NODE_ENV: production
@@ -49,13 +49,13 @@ services:
     environment:
       POSTGRES_USER: trustroute
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
-      POSTGRES_DB: trustroute
+      POSTGRES_DB: privid
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./db/migrations:/docker-entrypoint-initdb.d:ro
     # NOTE: don't expose 5432 in production — only accessible internally
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U privid']
+      test: ['CMD-SHELL', 'pg_isready -U trustroute -d privid']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -74,20 +74,28 @@ services:
       - api/.env.production
     environment:
       DATABASE_URL: postgresql://trustroute:${POSTGRES_PASSWORD}@postgres:5432/privid
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379
       BUSINESS_API_PORT: 3002
+      NODE_ENV: production
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: trustroute-worker:latest
+    container_name: trustroute_worker
+    restart: unless-stopped
+    platform: linux/amd64
+    env_file:
+      - api/.env.production
+    environment:
+      DATABASE_URL: postgresql://trustroute:${POSTGRES_PASSWORD}@postgres:5432/privid
+      REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379
       NODE_ENV: production
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    healthcheck:
-      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3002/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 45s
 
   redis:
     image: redis:7-alpine

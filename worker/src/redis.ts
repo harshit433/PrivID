@@ -5,9 +5,14 @@
  */
 import Redis from 'ioredis';
 
+let bullRedis: Redis | null = null;
+
 export function getBullRedis(): Redis {
-  return new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379', {
-    maxRetriesPerRequest: null,   // required by BullMQ
-    enableReadyCheck: false,
-  });
+  if (!bullRedis) {
+    bullRedis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379', {
+      maxRetriesPerRequest: null,   // required by BullMQ
+      enableReadyCheck: false,
+    });
+  }
+  return bullRedis;
 }

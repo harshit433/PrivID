@@ -45,5 +45,10 @@ else
 fi
 
 cd /app/api
+if [ "$#" -gt 0 ]; then
+  echo "[entrypoint] Running provided command: $*"
+  exec "$@"
+fi
+
 echo "[entrypoint] Starting API on port ${API_PORT:-3000}..."
-exec npx tsx src/server.ts
+exec node dist/server.js

@@ -102,6 +102,19 @@ function suggestActions(score: number, gap: number): string[] {
 
 trustRouter.post('/verify/phone', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    // Prevent trust inflation: this endpoint is only allowed after OTP/auth has already
+    // marked the user phone as verified. (The auth flow is the source of truth.)
+    const existing = await queryOne<{ factor_id: string }>(
+      `SELECT factor_id
+         FROM trust_factors
+        WHERE user_id = $1 AND factor_type = 'phone_verified' AND status = 'completed' AND is_latest = TRUE
+        LIMIT 1`,
+      [req.user!.sub],
+    );
+    if (!existing) {
+      throw new AppError(400, 'PHONE_NOT_VERIFIED', 'Phone number is not verified for this account.');
+    }
+
     await withTransaction(async (client) => {
       await client.query(
         `INSERT INTO trust_factors (user_id, factor_type, status, provider, score_delta, verified_at)
@@ -185,6 +198,12 @@ trustRouter.post('/verify/device/integrity', requireAuth, async (req: Request, r
         integrityFailureMessage(integrityResult.reason),
       );
     }
+
+    // Mark integrity verified for subsequent device registration steps (SIM bind / complete).
+    // This prevents flows from completing "device_integrity" without a prior attestation.
+    try {
+      await getRedis().set(`integrity_verified:${req.user!.sub}`, '1', 'EX', 900);
+    } catch { /* Redis down — device registration will fail closed in production */ }
 
     res.json({ ok: true, data: { verified: true } });
   } catch (err) {
@@ -373,6 +392,28 @@ async function completeDeviceRegistration(
     integrity_token?: string;
   },
 ): Promise<{ score: number; tier: string }> {
+  if (process.env.NODE_ENV === 'production') {
+    try {
+      const ok = await getRedis().get(`integrity_verified:${userId}`);
+      if (!ok) {
+        throw new AppError(
+          400,
+          'DEVICE_INTEGRITY_REQUIRED',
+          'Device integrity must be verified before completing device registration.',
+        );
+      }
+    } catch (err) {
+      // If Redis is unavailable, fail closed in production to avoid completing
+      // device integrity without an attestation.
+      if (err instanceof AppError) throw err;
+      throw new AppError(
+        503,
+        'REDIS_UNAVAILABLE',
+        'Security verification is temporarily unavailable. Please try again shortly.',
+      );
+    }
+  }
+
   await withTransaction(async (client) => {
     await client.query(
       `INSERT INTO device_registrations
@@ -786,6 +827,10 @@ trustRouter.post('/verify/govt-id/initiate', requireAuth, async (req: Request, r
 
 trustRouter.post('/verify/govt-id/complete', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    if (process.env.NODE_ENV === 'production') {
+      throw new AppError(404, 'NOT_FOUND', 'Not found.');
+    }
+
     const { provider_ref } = z.object({ provider_ref: z.string() }).parse(req.body);
 
     const factor = await queryOne(

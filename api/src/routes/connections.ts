@@ -175,9 +175,15 @@ connectionsRouter.patch('/:id/permission', requireAuth, async (req: Request, res
        SET connection_type = $1,
            temporary_expires_at = $2,
            daily_call_limit = $3
-       WHERE connection_id = $4
+       WHERE connection_id = $4 AND owner_id = $5
        RETURNING *`,
-      [body.connection_type, body.temporary_expires_at ?? null, body.daily_call_limit ?? null, req.params.id]
+      [
+        body.connection_type,
+        body.temporary_expires_at ?? null,
+        body.daily_call_limit ?? null,
+        req.params.id,
+        req.user!.sub,
+      ]
     );
 
     // Mirror the relationship into chat: block bans, any other type unbans.

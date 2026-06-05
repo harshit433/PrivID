@@ -114,8 +114,9 @@ channelsRouter.patch('/:id', requireAuth, async (req: Request, res: Response, ne
     if (updates.length === 0) throw new AppError(400, 'NO_CHANGES', 'Nothing to update.');
 
     params.push(req.params.id);
+    params.push(req.user!.sub);
     const [updated] = await query(
-      `UPDATE reachability_channels SET ${updates.join(', ')} WHERE channel_id = $${i} RETURNING *`,
+      `UPDATE reachability_channels SET ${updates.join(', ')} WHERE channel_id = $${i} AND owner_id = $${i + 1} RETURNING *`,
       params
     );
 

@@ -46,6 +46,7 @@ COPY docker/api-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 WORKDIR /app/api
+RUN npm run build --workspace=@trustroute/api
 
 EXPOSE 3000
 

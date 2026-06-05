@@ -559,7 +559,8 @@ authRouter.post('/otp/send', async (req: Request, res: Response, next: NextFunct
       JSON.stringify({ phone_e164, otp_hash, attempts: 0, mode }),
     );
 
-    await sendLoginOtpSms(phone_e164, otp);
+    // Keep SMS validity aligned with server-side OTP session TTL.
+    await sendLoginOtpSms(phone_e164, otp, { otpExpiryMinutes: Math.ceil(OTP_SESSION_TTL_SEC / 60) });
 
     res.json({
       ok: true,

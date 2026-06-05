@@ -47,6 +47,7 @@ import type { TrustTier, UserRow } from '@trustroute/shared';
 import { extractFeatures } from './featureStore';
 import { mlScoreUser, mlBatchScore } from './mlClient';
 import type { UserFeatures } from './featureStore';
+import { scheduleTrustRecompute } from './trustQueue';
 
 const TRUST_SCORE_TTL_S = 300; // 5 minutes — short enough to stay fresh, long enough to avoid redundant ML calls
 
@@ -137,6 +138,57 @@ export async function computeTrustScore(userId: string): Promise<TrustBreakdown>
   getRedis().setex(keys.trustScore(userId), TRUST_SCORE_TTL_S, JSON.stringify(result)).catch(() => {});
 
   return result;
+}
+
+/** Fire-and-forget full score computation to warm Redis (never blocks callers). */
+export function warmTrustScoreCache(userId: string): void {
+  computeTrustScore(userId).catch(() => {});
+}
+
+/**
+ * Fast read path for API responses — avoids ML + feature extraction on cache miss.
+ * Uses Redis when available, otherwise persisted user row + verification breakdown.
+ */
+export async function getTrustScoreSnapshot(userId: string): Promise<TrustBreakdown> {
+  try {
+    const cached = await getRedis().get(keys.trustScore(userId));
+    if (cached) return JSON.parse(cached) as TrustBreakdown;
+  } catch { /* fall through */ }
+
+  const [verif, user] = await Promise.all([
+    computeVerificationPoints(userId),
+    queryOne<Pick<UserRow, 'trust_score' | 'trust_tier'>>(
+      `SELECT trust_score, trust_tier FROM users WHERE user_id = $1`,
+      [userId],
+    ),
+  ]);
+
+  const persisted = user?.trust_score ?? verif.total;
+  const mlModifier = clampScore(persisted) - verif.total;
+  const factors = { ...verif.factors, ml_modifier: mlModifier };
+  const total = user ? user.trust_score : verif.total;
+  const tier = user ? user.trust_tier : scoreToTier(verif.total);
+
+  return { total, tier, factors };
+}
+
+/**
+ * After a trust factor changes: invalidate cache, enqueue worker recompute,
+ * return an immediate verification-based snapshot (ML updates async).
+ */
+export async function finalizeTrustFactor(userId: string, reason: string): Promise<TrustBreakdown> {
+  await invalidateTrustScoreCache(userId);
+  scheduleTrustRecompute(userId, reason);
+
+  const verif = await computeVerificationPoints(userId);
+  const snapshot: TrustBreakdown = {
+    total: verif.total,
+    tier: scoreToTier(verif.total),
+    factors: { ...verif.factors, ml_modifier: 0 },
+  };
+
+  warmTrustScoreCache(userId);
+  return snapshot;
 }
 
 // ─── Bulk compute (simulation + admin jobs) ───────────────────────────────────

@@ -250,9 +250,9 @@ chatRouter.post('/webhook', async (req: Request, res: Response) => {
       });
     }
 
-    // Accepted — record it for the counters.
+    // Accepted — record counters asynchronously (webhook must respond quickly).
     if (cid) {
-      await logMessage(message.id, cid, senderId, recipientId).catch(() => {});
+      void logMessage(message.id, cid, senderId, recipientId).catch(() => {});
     }
 
     return res.status(200).json({});

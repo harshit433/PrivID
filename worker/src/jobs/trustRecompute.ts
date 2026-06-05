@@ -227,7 +227,7 @@ export async function enqueueTrustRecompute(
     reason,
     { user_id: userId, reason },
     {
-      jobId:            `trust-${userId}-${Date.now()}`,
+      jobId:            `trust-recompute:${userId}`,
       removeOnComplete: { count: 200 },
       removeOnFail:     { count: 50 },
       attempts:         3,

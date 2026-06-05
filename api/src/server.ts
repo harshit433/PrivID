@@ -40,7 +40,16 @@ import { logger } from './utils/logger';
 
 const app = express();
 const PORT = parseInt(process.env.API_PORT ?? '3000', 10);
-const JSON_LIMIT = process.env.EXPRESS_JSON_LIMIT ?? '15mb';
+const JSON_LIMIT_DEFAULT = process.env.EXPRESS_JSON_LIMIT ?? '1mb';
+const JSON_LIMIT_LARGE = process.env.EXPRESS_JSON_LARGE_LIMIT ?? '15mb';
+
+function pathNeedsLargeJsonBody(path: string): boolean {
+  return (
+    path === '/trust/verify/liveness/complete' ||
+    path === '/users/me/avatar' ||
+    path.startsWith('/status')
+  );
+}
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(helmet());
@@ -63,10 +72,14 @@ app.use(cors({
   credentials: true,
 }));
 // Capture the raw body so the Stream chat webhook can verify its HMAC signature.
-app.use(express.json({
-  limit: JSON_LIMIT,
-  verify: (req, _res, buf) => { (req as any).rawBody = buf; },
-}));
+// Most routes use a 1 MB cap; media upload routes opt into a larger limit.
+app.use((req, res, next) => {
+  const limit = pathNeedsLargeJsonBody(req.path) ? JSON_LIMIT_LARGE : JSON_LIMIT_DEFAULT;
+  express.json({
+    limit,
+    verify: (_req, _res, buf) => { (req as any).rawBody = buf; },
+  })(req, res, next);
+});
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 // ─── Health ───────────────────────────────────────────────────────────────────

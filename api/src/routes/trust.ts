@@ -4,7 +4,11 @@ import { z } from 'zod';
 import { query, queryOne, withTransaction, getRedis, keys } from '@trustroute/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
-import { recomputeAndPersist, computeTrustScore } from '../services/trustScore';
+import {
+  finalizeTrustFactor,
+  getTrustScoreSnapshot,
+  warmTrustScoreCache,
+} from '../services/trustScore';
 import { isLivenessConfigured, checkLiveness, livenessThreshold } from '../services/liveness';
 import {
   verifyAndroidIntegrityToken,
@@ -38,15 +42,18 @@ trustRouter.get('/nonce', requireAuth, async (req: Request, res: Response, next:
 trustRouter.get('/score', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
     // Both queries are independent — run in parallel.
+    const userId = req.user!.sub;
+    warmTrustScoreCache(userId);
+
     const [breakdown, history] = await Promise.all([
-      computeTrustScore(req.user!.sub),
+      getTrustScoreSnapshot(userId),
       query(
         `SELECT old_score, new_score, old_tier, new_tier, reason, created_at
            FROM trust_score_history
           WHERE user_id = $1
           ORDER BY created_at DESC
           LIMIT 10`,
-        [req.user!.sub],
+        [userId],
       ),
     ]);
 
@@ -125,7 +132,7 @@ trustRouter.post('/verify/phone', requireAuth, async (req: Request, res: Respons
       );
     });
 
-    const breakdown = await recomputeAndPersist(req.user!.sub);
+    const breakdown = await finalizeTrustFactor(req.user!.sub, 'phone_verified');
     res.json({ ok: true, data: { score: breakdown.total, tier: breakdown.tier } });
   } catch (err) {
     next(err);
@@ -443,7 +450,7 @@ async function completeDeviceRegistration(
     );
   });
 
-  const breakdown = await recomputeAndPersist(userId);
+  const breakdown = await finalizeTrustFactor(userId, 'device_integrity');
   return { score: breakdown.total, tier: breakdown.tier };
 }
 
@@ -616,7 +623,7 @@ trustRouter.post('/verify/device', requireAuth, async (req: Request, res: Respon
       );
     });
 
-    const breakdown = await recomputeAndPersist(req.user!.sub);
+    const breakdown = await finalizeTrustFactor(req.user!.sub, 'device_integrity');
     res.json({ ok: true, data: { score: breakdown.total, tier: breakdown.tier } });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
@@ -719,7 +726,7 @@ trustRouter.post('/verify/liveness/complete', requireAuth, async (req: Request, 
     );
     if (!factor) throw new AppError(404, 'FACTOR_NOT_FOUND', 'Liveness session not found.');
     if (factor.status === 'completed') {
-      const breakdown = await computeTrustScore(req.user!.sub);
+      const breakdown = await getTrustScoreSnapshot(req.user!.sub);
       return res.json({ ok: true, data: { score: breakdown.total, tier: breakdown.tier, already_verified: true } });
     }
 
@@ -770,7 +777,7 @@ trustRouter.post('/verify/liveness/complete', requireAuth, async (req: Request, 
       [factor.factor_id, JSON.stringify({ score })]
     );
 
-    const breakdown = await recomputeAndPersist(req.user!.sub);
+    const breakdown = await finalizeTrustFactor(req.user!.sub, 'liveness_check');
     res.json({
       ok: true,
       data: {
@@ -845,7 +852,7 @@ trustRouter.post('/verify/govt-id/complete', requireAuth, async (req: Request, r
       [factor.factor_id]
     );
 
-    const breakdown = await recomputeAndPersist(req.user!.sub);
+    const breakdown = await finalizeTrustFactor(req.user!.sub, 'govt_id_verified');
     res.json({ ok: true, data: { score: breakdown.total, tier: breakdown.tier } });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));

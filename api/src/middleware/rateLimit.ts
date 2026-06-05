@@ -10,13 +10,25 @@ interface RateLimitOptions {
   errorMessage?: string;
 }
 
+const INCR_WITH_EXPIRE = `
+  local count = redis.call('INCR', KEYS[1])
+  if count == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+  end
+  return count
+`;
+
 export function rateLimit(opts: RateLimitOptions) {
   return async (req: Request, _res: Response, next: NextFunction) => {
     try {
       const redis = getRedis();
       const key = `rl:${opts.keyFn(req)}`;
-      const count = await redis.incr(key);
-      if (count === 1) await redis.expire(key, opts.windowSeconds);
+      const count = (await redis.eval(
+        INCR_WITH_EXPIRE,
+        1,
+        key,
+        String(opts.windowSeconds),
+      )) as number;
       if (count > opts.maxRequests) {
         return next(
           new AppError(

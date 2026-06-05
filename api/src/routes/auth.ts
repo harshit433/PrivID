@@ -10,7 +10,7 @@ import type { OtpSessionRow, UserRow, RefreshTokenRow, ShadowNumberRow } from '@
 import { AppError } from '../middleware/errorHandler';
 import { requireAuth } from '../middleware/auth';
 import { verifyMsg91AccessToken, sendLoginOtpSms } from '../services/msg91';
-import { recomputeAndPersist } from '../services/trustScore';
+import { finalizeTrustFactor } from '../services/trustScore';
 import { buildHandleCandidates } from '../utils/handles';
 import { logger } from '../utils/logger';
 
@@ -90,7 +90,7 @@ async function markPhoneVerified(userId: string): Promise<void> {
      DO UPDATE SET status = 'completed', verified_at = NOW(), provider = 'msg91'`,
     [userId]
   );
-  await recomputeAndPersist(userId);
+  await finalizeTrustFactor(userId, 'phone_verified');
 }
 
 async function issueAuthResponse(
@@ -469,13 +469,13 @@ authRouter.post('/phone/check', async (req: Request, res: Response, next: NextFu
 // ─── POST /auth/handles/suggest ───────────────────────────────────────────────
 
 async function filterAvailableHandles(candidates: string[], limit: number): Promise<string[]> {
-  const available: string[] = [];
-  for (const handle of candidates) {
-    const taken = await queryOne(`SELECT handle FROM users WHERE handle = $1`, [handle]);
-    if (!taken) available.push(handle);
-    if (available.length >= limit) break;
-  }
-  return available;
+  if (candidates.length === 0) return [];
+  const rows = await query<{ handle: string }>(
+    `SELECT handle FROM users WHERE handle = ANY($1::text[])`,
+    [candidates],
+  );
+  const taken = new Set(rows.map((r) => r.handle));
+  return candidates.filter((h) => !taken.has(h)).slice(0, limit);
 }
 
 authRouter.post('/handles/suggest', async (req: Request, res: Response, next: NextFunction) => {

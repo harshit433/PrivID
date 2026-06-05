@@ -20,14 +20,19 @@ function isS3Configured(): boolean {
   );
 }
 
+let s3Client: S3Client | null = null;
+
 function getS3Client(): S3Client {
-  return new S3Client({
-    region: process.env.AWS_REGION!,
-    credentials: {
-      accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
-      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
-    },
-  });
+  if (!s3Client) {
+    s3Client = new S3Client({
+      region: process.env.AWS_REGION!,
+      credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+      },
+    });
+  }
+  return s3Client;
 }
 
 export async function generateAvatarUploadUrl(

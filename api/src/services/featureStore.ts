@@ -295,21 +295,21 @@ async function getBehavioralFeatures(userId: string) {
        FROM callee_stats`,
       [userId],
     ),
-    // Sequential dialing: max unique callees in any 30-min window
+    // Sequential dialing: max unique callees in any 30-min window (LATERAL scan per anchor time)
     queryOne<{ seq_max: string }>(
-      `WITH windows AS (
-         SELECT c1.call_id,
-           COUNT(DISTINCT c2.callee_id) AS callees_in_window
-         FROM calls c1
-         JOIN calls c2
-           ON c2.caller_id = c1.caller_id
-           AND c2.created_at BETWEEN c1.created_at AND c1.created_at + INTERVAL '30 minutes'
-           AND c2.call_id != c1.call_id
-         WHERE c1.caller_id = $1
-           AND c1.created_at > NOW() - INTERVAL '7 days'
-         GROUP BY c1.call_id
-       )
-       SELECT COALESCE(MAX(callees_in_window), 0)::text AS seq_max FROM windows`,
+      `SELECT COALESCE(MAX(w.cnt), 0)::text AS seq_max
+       FROM (
+         SELECT DISTINCT created_at AS anchor_at
+         FROM calls
+         WHERE caller_id = $1
+           AND created_at > NOW() - INTERVAL '7 days'
+       ) anchors
+       CROSS JOIN LATERAL (
+         SELECT COUNT(DISTINCT callee_id) AS cnt
+         FROM calls c
+         WHERE c.caller_id = $1
+           AND c.created_at BETWEEN anchors.anchor_at AND anchors.anchor_at + INTERVAL '30 minutes'
+       ) w`,
       [userId],
     ),
     // Unknown call ratio

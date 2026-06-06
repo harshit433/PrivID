@@ -19,6 +19,7 @@ import { subscriptionsRouter } from './routes/subscriptions';
 import { businessRegisterRouter } from './routes/businessRegister';
 import { adminRouter } from './routes/admin';
 import { activitiesRouter } from './routes/activities';
+import { referralsRouter } from './routes/referrals';
 import {
   mountBusinessSuite,
   routeByApiKey,
@@ -174,6 +175,7 @@ app.use(
 );
 app.use('/calls', apiLimiter, callsRouter);
 app.use('/activities', apiLimiter, activitiesRouter);
+app.use('/referrals', apiLimiter, referralsRouter);
 app.use('/channels', apiLimiter, routeByApiKey(businessChannelsRouter, channelsRouter));
 // Stream calls /chat/webhook server-to-server (no user) — exempt it from the
 // per-user limiter; all other /chat routes are authenticated + rate limited.

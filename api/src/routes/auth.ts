@@ -13,6 +13,7 @@ import { verifyMsg91AccessToken, sendLoginOtpSms } from '../services/msg91';
 import { finalizeTrustFactor } from '../services/trustScore';
 import { buildHandleCandidates } from '../utils/handles';
 import { logger } from '../utils/logger';
+import { applyReferralOnOnboardingComplete, ensureReferralCode } from '../services/referrals';
 
 export const authRouter = Router();
 
@@ -854,6 +855,9 @@ authRouter.post('/msg91/verify', async (req: Request, res: Response, next: NextF
 authRouter.post('/complete-onboarding', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.sub;
+    const body = z.object({
+      referral_code: z.string().max(32).optional(),
+    }).parse(req.body ?? {});
 
     const factors = await query<{ factor_type: string; status: string }>(
       `SELECT factor_type, status FROM trust_factors
@@ -880,8 +884,25 @@ authRouter.post('/complete-onboarding', requireAuth, async (req: Request, res: R
       `UPDATE users SET onboarding_complete = TRUE, updated_at = NOW() WHERE user_id = $1`,
       [userId]
     );
-    res.json({ ok: true, data: { onboarding_complete: true } });
+
+    let referral: { applied: boolean; referrer_handle?: string } | undefined;
+    if (body.referral_code?.trim()) {
+      referral = await applyReferralOnOnboardingComplete(userId, body.referral_code);
+    }
+
+    await ensureReferralCode(userId);
+
+    res.json({
+      ok: true,
+      data: {
+        onboarding_complete: true,
+        referral,
+      },
+    });
   } catch (err) {
+    if (err instanceof z.ZodError) {
+      return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0]!.message));
+    }
     next(err);
   }
 });

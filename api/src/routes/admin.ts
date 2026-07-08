@@ -136,7 +136,7 @@ async function applyAdminTrustDelta(
 
 adminRouter.get('/stats', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const [users, calls, connections, reviews, shadowObs, recentActions] = await Promise.all([
+    const [users, calls, connections, reviews, shadowObs, recentActions, referrals] = await Promise.all([
       queryOne<{ total: string; verified: string; premium: string; under_review: string; suspended: string }>(
         `SELECT
            COUNT(*) FILTER (WHERE is_active = TRUE)::text  AS total,
@@ -179,6 +179,20 @@ adminRouter.get('/stats', async (_req: Request, res: Response, next: NextFunctio
            COUNT(*) FILTER (WHERE action = 'monitor'  AND created_at > NOW() - INTERVAL '7 days')::text AS monitor
          FROM admin_actions`,
       ),
+      queryOne<{
+        total_events: string;
+        pending_withdrawals: string;
+        total_withdrawable_paise: string;
+        total_pending_paise: string;
+        total_paid_paise: string;
+      }>(
+        `SELECT
+           (SELECT COUNT(*)::text FROM referral_events WHERE status = 'credited') AS total_events,
+           (SELECT COUNT(*)::text FROM referral_withdrawals WHERE status IN ('requested', 'processing')) AS pending_withdrawals,
+           (SELECT COALESCE(SUM(withdrawable_paise), 0)::text FROM referral_wallets) AS total_withdrawable_paise,
+           (SELECT COALESCE(SUM(pending_paise), 0)::text FROM referral_wallets) AS total_pending_paise,
+           (SELECT COALESCE(SUM(amount_paise), 0)::text FROM referral_withdrawals WHERE status = 'paid') AS total_paid_paise`,
+      ),
     ]);
 
     res.json({
@@ -213,6 +227,13 @@ adminRouter.get('/stats', async (_req: Request, res: Response, next: NextFunctio
           restrict: parseInt(recentActions?.restrict ?? '0'),
           suspend:  parseInt(recentActions?.suspend  ?? '0'),
           monitor:  parseInt(recentActions?.monitor  ?? '0'),
+        },
+        referrals: {
+          total_events:           parseInt(referrals?.total_events ?? '0'),
+          pending_withdrawals:    parseInt(referrals?.pending_withdrawals ?? '0'),
+          total_withdrawable_paise: parseInt(referrals?.total_withdrawable_paise ?? '0'),
+          total_pending_paise:    parseInt(referrals?.total_pending_paise ?? '0'),
+          total_paid_paise:       parseInt(referrals?.total_paid_paise ?? '0'),
         },
       },
     });
@@ -940,10 +961,12 @@ adminRouter.get('/users', async (req: Request, res: Response, next: NextFunction
         trust_score: number;
         is_active: boolean;
         is_under_review: boolean;
+        onboarding_complete: boolean;
         created_at: Date;
       }>(
         `SELECT user_id, handle, display_name, phone_e164,
-                trust_tier::text AS trust_tier, trust_score, is_active, is_under_review, created_at
+                trust_tier::text AS trust_tier, trust_score, is_active, is_under_review,
+                onboarding_complete, created_at
          FROM users
          WHERE ($1::text IS NULL OR handle ILIKE $1 OR display_name ILIKE $1 OR phone_e164 ILIKE $1)
          ORDER BY created_at DESC
@@ -1175,6 +1198,325 @@ adminRouter.post('/businesses/:id/suspend', async (req: Request, res: Response, 
     await logBusinessAction(req.params.id, 'business_suspended', null, {}, req.headers['x-admin-ref'] as string);
     res.json({ ok: true, data: { business_id: row.business_id, status: 'suspended' } });
   } catch (err) {
+    next(err);
+  }
+});
+
+// ─── GET /admin/users/:id — user profile + referral context ───────────────────
+
+adminRouter.get('/users/:id', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const userId = req.params.id;
+
+    const user = await queryOne<UserRow>(
+      `SELECT user_id, phone_e164, handle, display_name, avatar_url,
+              trust_tier::text AS trust_tier, trust_score, email, profession, bio,
+              is_active, onboarding_complete, discovery_mode::text AS discovery_mode,
+              is_under_review, review_reason, review_started_at, created_at, updated_at
+       FROM users WHERE user_id = $1`,
+      [userId],
+    );
+    if (!user) throw new AppError(404, 'NOT_FOUND', 'User not found.');
+
+    const [codeRow, walletRow, referralsMade, referredBy, ledger, callStats, devices] = await Promise.all([
+      queryOne<{ code: string }>(`SELECT code FROM referral_codes WHERE user_id = $1`, [userId]),
+      queryOne<{
+        total_earned_paise: number;
+        withdrawable_paise: number;
+        pending_paise: number;
+        withdrawal_unlocked: boolean;
+      }>(
+        `SELECT total_earned_paise, withdrawable_paise, pending_paise, withdrawal_unlocked
+         FROM referral_wallets WHERE user_id = $1`,
+        [userId],
+      ),
+      queryOne<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM referral_events
+         WHERE referrer_user_id = $1 AND status = 'credited'`,
+        [userId],
+      ),
+      queryOne<{
+        event_id: string;
+        referrer_handle: string;
+        created_at: Date;
+        referrer_bonus_paise: number;
+        referee_bonus_paise: number;
+      }>(
+        `SELECT re.event_id, ru.handle AS referrer_handle, re.created_at,
+                re.referrer_bonus_paise, re.referee_bonus_paise
+         FROM referral_events re
+         JOIN users ru ON ru.user_id = re.referrer_user_id
+         WHERE re.referee_user_id = $1 AND re.status = 'credited'`,
+        [userId],
+      ),
+      query<{
+        entry_id: string;
+        amount_paise: number;
+        entry_type: string;
+        description: string | null;
+        created_at: Date;
+      }>(
+        `SELECT entry_id, amount_paise, entry_type::text AS entry_type, description, created_at
+         FROM referral_ledger WHERE user_id = $1 ORDER BY created_at DESC LIMIT 30`,
+        [userId],
+      ),
+      queryOne<{
+        calls_total: string;
+        calls_7d: string;
+        call_seconds_7d: string;
+      }>(
+        `SELECT
+           COUNT(*)::text AS calls_total,
+           COUNT(*) FILTER (WHERE ended_at > NOW() - INTERVAL '7 days')::text AS calls_7d,
+           COALESCE(SUM(duration_seconds) FILTER (
+             WHERE status = 'ended' AND duration_seconds >= 10
+               AND ended_at > NOW() - INTERVAL '7 days'
+           ), 0)::text AS call_seconds_7d
+         FROM calls
+         WHERE caller_id = $1 OR callee_id = $1`,
+        [userId],
+      ),
+      query<{ platform: string; created_at: Date; last_seen_at: Date }>(
+        `SELECT platform, created_at, last_seen_at
+         FROM device_registrations WHERE user_id = $1 ORDER BY created_at ASC`,
+        [userId],
+      ),
+    ]);
+
+    res.json({
+      ok: true,
+      data: {
+        user,
+        referral: {
+          code: codeRow?.code ?? null,
+          wallet: walletRow ?? null,
+          referrals_made: parseInt(referralsMade?.count ?? '0', 10),
+          referred_by: referredBy ?? null,
+          ledger,
+        },
+        activity: {
+          calls_total:    parseInt(callStats?.calls_total ?? '0', 10),
+          calls_7d:       parseInt(callStats?.calls_7d ?? '0', 10),
+          call_minutes_7d: Math.floor(parseInt(callStats?.call_seconds_7d ?? '0', 10) / 60),
+          devices,
+        },
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Referrals admin ──────────────────────────────────────────────────────────
+
+adminRouter.get('/referrals/stats', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const row = await queryOne<{
+      total_events: string;
+      events_7d: string;
+      unique_referrers: string;
+      pending_withdrawals: string;
+      processing_withdrawals: string;
+      paid_withdrawals: string;
+      failed_withdrawals: string;
+      total_withdrawable_paise: string;
+      total_pending_paise: string;
+      total_earned_paise: string;
+      total_paid_out_paise: string;
+    }>(
+      `SELECT
+         (SELECT COUNT(*)::text FROM referral_events WHERE status = 'credited') AS total_events,
+         (SELECT COUNT(*)::text FROM referral_events WHERE status = 'credited' AND created_at > NOW() - INTERVAL '7 days') AS events_7d,
+         (SELECT COUNT(DISTINCT referrer_user_id)::text FROM referral_events WHERE status = 'credited') AS unique_referrers,
+         (SELECT COUNT(*)::text FROM referral_withdrawals WHERE status = 'requested') AS pending_withdrawals,
+         (SELECT COUNT(*)::text FROM referral_withdrawals WHERE status = 'processing') AS processing_withdrawals,
+         (SELECT COUNT(*)::text FROM referral_withdrawals WHERE status = 'paid') AS paid_withdrawals,
+         (SELECT COUNT(*)::text FROM referral_withdrawals WHERE status = 'failed') AS failed_withdrawals,
+         (SELECT COALESCE(SUM(withdrawable_paise), 0)::text FROM referral_wallets) AS total_withdrawable_paise,
+         (SELECT COALESCE(SUM(pending_paise), 0)::text FROM referral_wallets) AS total_pending_paise,
+         (SELECT COALESCE(SUM(total_earned_paise), 0)::text FROM referral_wallets) AS total_earned_paise,
+         (SELECT COALESCE(SUM(amount_paise), 0)::text FROM referral_withdrawals WHERE status = 'paid') AS total_paid_out_paise`,
+    );
+
+    res.json({
+      ok: true,
+      data: {
+        total_events:           parseInt(row?.total_events ?? '0', 10),
+        events_7d:              parseInt(row?.events_7d ?? '0', 10),
+        unique_referrers:       parseInt(row?.unique_referrers ?? '0', 10),
+        pending_withdrawals:    parseInt(row?.pending_withdrawals ?? '0', 10),
+        processing_withdrawals: parseInt(row?.processing_withdrawals ?? '0', 10),
+        paid_withdrawals:       parseInt(row?.paid_withdrawals ?? '0', 10),
+        failed_withdrawals:     parseInt(row?.failed_withdrawals ?? '0', 10),
+        total_withdrawable_paise: parseInt(row?.total_withdrawable_paise ?? '0', 10),
+        total_pending_paise:    parseInt(row?.total_pending_paise ?? '0', 10),
+        total_earned_paise:     parseInt(row?.total_earned_paise ?? '0', 10),
+        total_paid_out_paise:   parseInt(row?.total_paid_out_paise ?? '0', 10),
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get('/referrals/events', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '50'), 10) || 50));
+    const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0);
+
+    const [rows, countRow] = await Promise.all([
+      query<{
+        event_id: string;
+        referrer_user_id: string;
+        referrer_handle: string;
+        referee_user_id: string;
+        referee_handle: string;
+        referral_code: string;
+        referrer_bonus_paise: number;
+        referee_bonus_paise: number;
+        status: string;
+        created_at: Date;
+      }>(
+        `SELECT re.event_id, re.referrer_user_id, ru.handle AS referrer_handle,
+                re.referee_user_id, rf.handle AS referee_handle,
+                re.referral_code, re.referrer_bonus_paise, re.referee_bonus_paise,
+                re.status, re.created_at
+         FROM referral_events re
+         JOIN users ru ON ru.user_id = re.referrer_user_id
+         JOIN users rf ON rf.user_id = re.referee_user_id
+         ORDER BY re.created_at DESC
+         LIMIT $1 OFFSET $2`,
+        [limit, offset],
+      ),
+      queryOne<{ total: string }>(`SELECT COUNT(*)::text AS total FROM referral_events`),
+    ]);
+
+    res.json({
+      ok: true,
+      data: { events: rows, total: parseInt(countRow?.total ?? '0', 10), limit, offset },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+adminRouter.get('/referrals/withdrawals', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '50'), 10) || 50));
+    const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0);
+    const status = (req.query.status as string | undefined)?.trim();
+
+    const statusFilter = status && status !== 'all' ? status : null;
+
+    const [rows, countRow] = await Promise.all([
+      query<{
+        withdrawal_id: string;
+        user_id: string;
+        handle: string;
+        display_name: string | null;
+        amount_paise: number;
+        upi_id: string;
+        status: string;
+        created_at: Date;
+        updated_at: Date;
+      }>(
+        `SELECT w.withdrawal_id, w.user_id, u.handle, u.display_name,
+                w.amount_paise, w.upi_id, w.status, w.created_at, w.updated_at
+         FROM referral_withdrawals w
+         JOIN users u ON u.user_id = w.user_id
+         WHERE ($1::text IS NULL OR w.status = $1)
+         ORDER BY w.created_at DESC
+         LIMIT $2 OFFSET $3`,
+        [statusFilter, limit, offset],
+      ),
+      queryOne<{ total: string }>(
+        `SELECT COUNT(*)::text AS total FROM referral_withdrawals
+         WHERE ($1::text IS NULL OR status = $1)`,
+        [statusFilter],
+      ),
+    ]);
+
+    res.json({
+      ok: true,
+      data: { withdrawals: rows, total: parseInt(countRow?.total ?? '0', 10), limit, offset },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const withdrawalStatusSchema = z.object({
+  status: z.enum(['processing', 'paid', 'failed']),
+  note: z.string().max(500).optional(),
+});
+
+adminRouter.patch('/referrals/withdrawals/:id', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = withdrawalStatusSchema.parse(req.body);
+    const adminRef = req.headers['x-admin-ref'] as string | undefined;
+
+    const result = await withTransaction(async (client) => {
+      const { rows } = await client.query<{
+        withdrawal_id: string;
+        user_id: string;
+        amount_paise: number;
+        status: string;
+        upi_id: string;
+      }>(
+        `SELECT withdrawal_id, user_id, amount_paise, status, upi_id
+         FROM referral_withdrawals WHERE withdrawal_id = $1 FOR UPDATE`,
+        [req.params.id],
+      );
+      const w = rows[0];
+      if (!w) throw new AppError(404, 'NOT_FOUND', 'Withdrawal not found.');
+      if (w.status === 'paid' || w.status === 'failed') {
+        throw new AppError(409, 'WITHDRAWAL_FINAL', 'Withdrawal is already finalized.');
+      }
+
+      await client.query(
+        `UPDATE referral_withdrawals
+         SET status = $2, updated_at = NOW()
+         WHERE withdrawal_id = $1`,
+        [w.withdrawal_id, body.status],
+      );
+
+      if (body.status === 'failed') {
+        await client.query(
+          `INSERT INTO referral_wallets (user_id, withdrawable_paise)
+           VALUES ($1, $2)
+           ON CONFLICT (user_id) DO UPDATE SET
+             withdrawable_paise = referral_wallets.withdrawable_paise + EXCLUDED.withdrawable_paise,
+             updated_at = NOW()`,
+          [w.user_id, w.amount_paise],
+        );
+        await client.query(
+          `INSERT INTO referral_ledger (user_id, amount_paise, entry_type, reference_id, description)
+           VALUES ($1, $2, 'pending_to_withdrawable', $3, $4)`,
+          [
+            w.user_id,
+            w.amount_paise,
+            w.withdrawal_id,
+            body.note ?? 'Withdrawal failed — amount refunded to wallet',
+          ],
+        );
+      }
+
+      return w;
+    });
+
+    await logAction(
+      result.user_id,
+      `withdrawal_${body.status}`,
+      body.note ?? null,
+      { withdrawal_id: result.withdrawal_id, amount_paise: result.amount_paise, upi_id: result.upi_id },
+      adminRef,
+    );
+
+    res.json({ ok: true, data: { withdrawal_id: result.withdrawal_id, status: body.status } });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0]!.message));
+    }
     next(err);
   }
 });

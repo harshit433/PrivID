@@ -22,6 +22,7 @@ export const shadowRecomputeQueue   = new Queue('shadow-recompute',  { connectio
 export const mlFeedbackQueue        = new Queue('ml-feedback',       { connection: getBullRedis() });
 export const statusExpiryQueue      = new Queue('status-expiry',     { connection: getBullRedis() });
 export const businessMessageDeliverQueue = new Queue('business-message-deliver', { connection: getBullRedis() });
+export const ringTimeoutQueue            = new Queue('ring-timeout',             { connection: getBullRedis() });
 
 // ─── Job data interfaces ──────────────────────────────────────────────────────
 
@@ -60,4 +61,8 @@ export interface StatusExpiryJob {
 
 export interface BusinessMessageDeliverJob {
   message_id: string;
+}
+
+export interface RingTimeoutJob {
+  call_id: string;
 }

@@ -35,6 +35,7 @@ import {
   startBusinessMessageDeliverWorker,
   enqueueDueScheduledBusinessMessages,
 } from './jobs/businessMessageDeliver';
+import { startRingTimeoutWorker } from './jobs/ringTimeout';
 import { isMLAvailable } from './utils/mlClient';
 import { logger } from './utils/logger';
 
@@ -61,6 +62,7 @@ async function main() {
     startMLFeedbackWorker(),
     startStatusExpiryWorker(),
     startBusinessMessageDeliverWorker(),
+    startRingTimeoutWorker(),
   ];
 
   logger.info(WORKER, `${workers.length} workers running`);

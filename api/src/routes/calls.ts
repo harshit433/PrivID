@@ -6,10 +6,22 @@ import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 // callLimiter intentionally not imported — trusted contacts bypass all rate limits
 import { trackEvent } from '../services/behavior';
-import { sendIncomingCallPush, rtdbCreateCall, rtdbUpdateStatus } from '../services/fcm';
+import { sendIncomingCallPush, sendCallCancelledPush, rtdbCreateCall, rtdbUpdateStatus } from '../services/fcm';
 import { logger } from '../utils/logger';
 import crypto from 'crypto';
 import { AccessToken } from 'livekit-server-sdk';
+import { Queue } from 'bullmq';
+
+// ─── BullMQ ring-timeout queue (lazy-initialized) ────────────────────────────
+let _ringQueue: Queue | null = null;
+function getRingTimeoutQueue(): Queue {
+  if (!_ringQueue) {
+    _ringQueue = new Queue('ring-timeout', {
+      connection: { url: process.env.REDIS_PRIVATE_URL ?? process.env.REDIS_URL ?? 'redis://localhost:6379' },
+    });
+  }
+  return _ringQueue;
+}
 
 export const callsRouter = Router();
 
@@ -117,13 +129,9 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
       // Restriction check — only applies to non-trusted callees
       const restriction = callerStatus?.call_restriction_until;
       if (restriction && new Date(restriction) > new Date()) {
-        const callerConn = await queryOne<{ connection_type: string }>(
-          `SELECT connection_type FROM connections WHERE owner_id = $1 AND contact_id = $2`,
-          [callerId, body.callee_id!],
-        );
         const isTrustedByMe =
-          callerConn?.connection_type === 'trusted' ||
-          callerConn?.connection_type === 'temporary';
+          callerToCalleeConn?.connection_type === 'trusted' ||
+          callerToCalleeConn?.connection_type === 'temporary';
 
         if (!isTrustedByMe) {
           const RESTRICTION_DAILY_CAP = 5;
@@ -200,8 +208,11 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
           try {
             const redis = getRedis();
             const rlKey = `call_unknown:${callerId}`;
-            const count = await redis.incr(rlKey);
-            if (count === 1) await redis.expire(rlKey, 600);
+            const pipeline = redis.pipeline();
+            pipeline.incr(rlKey);
+            pipeline.expire(rlKey, 600, 'NX'); // NX = only set expiry if not already set (atomic)
+            const results = await pipeline.exec();
+            const count = (results?.[0]?.[1] as number) ?? 0;
             if (count > 30) {
               throw new AppError(429, 'CALL_RATE_LIMITED',
                 'Too many calls to new contacts. Please wait a few minutes.');
@@ -222,7 +233,7 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
           );
           const cooldownMs = dynamicCooldownMs(recentCalls);
           if (recentCalls.length > 0 && cooldownMs > 0) {
-            const elapsed = Date.now() - new Date(recentCalls[0].created_at).getTime();
+            const elapsed = Math.max(0, Date.now() - new Date(recentCalls[0].created_at).getTime());
             if (elapsed < cooldownMs) {
               const remainSec = Math.ceil((cooldownMs - elapsed) / 1000);
               const msg = remainSec < 90
@@ -238,6 +249,27 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
     const webrtcRoomId = crypto.randomBytes(16).toString('base64url');
 
     const [call] = await withTransaction(async (client) => {
+      // Serialise concurrent initiation attempts from the same caller
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`call_init_${callerId}`]);
+
+      // Check callee is not already in a call
+      const activeCallee = await client.query(
+        `SELECT 1 FROM calls WHERE callee_id = $1 AND status IN ('initiated','ringing','answered') LIMIT 1`,
+        [calleeId]
+      );
+      if ((activeCallee.rowCount ?? 0) > 0) {
+        throw new AppError(409, 'CALLEE_BUSY', 'The person you are calling is already on a call.');
+      }
+
+      // Check caller is not already in a call
+      const activeCaller = await client.query(
+        `SELECT 1 FROM calls WHERE caller_id = $1 AND status IN ('initiated','ringing','answered') LIMIT 1`,
+        [callerId]
+      );
+      if ((activeCaller.rowCount ?? 0) > 0) {
+        throw new AppError(409, 'CALLER_BUSY', 'You already have an active call in progress.');
+      }
+
       const { rows } = await client.query<CallRow>(
         `INSERT INTO calls (caller_id, callee_id, call_type, channel_id, webrtc_room_id, status)
          VALUES ($1, $2, $3, $4, $5, 'ringing')
@@ -271,31 +303,14 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
     // ── RTDB: write initial call state (fire-and-forget) ─────────────────────
     rtdbCreateCall(call.call_id, callerId, calleeId).catch(() => {});
 
-    // ── Server-side ring timeout (45s) ───────────────────────────────────────
-    const ringTimeoutCallId = call.call_id;
-    setTimeout(() => {
-      (async () => {
-        try {
-          const stillRinging = await queryOne<CallRow>(
-            `SELECT * FROM calls
-              WHERE call_id = $1
-                AND status IN ('initiated', 'ringing')`,
-            [ringTimeoutCallId],
-          );
-          if (!stillRinging) return;
-          await queryOne<CallRow>(
-            `UPDATE calls SET status = 'missed', ended_at = NOW()
-              WHERE call_id = $1
-              RETURNING *`,
-            [ringTimeoutCallId],
-          );
-          await rtdbUpdateStatus(ringTimeoutCallId, 'missed');
-          logger.debug('calls', `Ring timeout — call ${ringTimeoutCallId} marked missed`);
-        } catch (err: any) {
-          logger.warn('calls', 'Ring timeout error:', err?.message);
-        }
-      })();
-    }, 45_000);
+    // ── Server-side ring timeout (45s) — persistent via BullMQ ─────────────
+    // Using a delayed BullMQ job instead of setTimeout so the timeout survives
+    // server restarts and rolling deploys.
+    getRingTimeoutQueue().add(
+      'ring-timeout',
+      { call_id: call.call_id },
+      { delay: 45_000, jobId: `ring-${call.call_id}`, removeOnComplete: true, removeOnFail: 10 },
+    ).catch((err: any) => logger.warn('calls', 'Failed to enqueue ring timeout:', err?.message));
 
     // ── FCM push to callee ────────────────────────────────────────────────────
     // Single query: get caller info + callee's FCM token + connection type
@@ -390,36 +405,59 @@ callsRouter.post('/:id/end', requireAuth, async (req: Request, res: Response, ne
       reason: z.enum(['declined', 'ended', 'failed', 'missed']).default('ended'),
     }).parse(req.body);
 
-    const call = await queryOne<CallRow>(
-      `SELECT * FROM calls WHERE call_id = $1 AND (caller_id = $2 OR callee_id = $2)`,
-      [req.params.id, req.user!.sub]
-    );
-    if (!call) throw new AppError(404, 'CALL_NOT_FOUND', 'Call not found.');
-
-    const durationSeconds = call.started_at
-      ? Math.floor((Date.now() - new Date(call.started_at).getTime()) / 1000)
-      : null;
-
-    const finalStatus = call.status === 'answered' ? 'ended' : reason;
-
-    const updatedCall = await queryOne<CallRow>(
-      `UPDATE calls
-       SET status = $1, ended_at = NOW(), duration_seconds = $2
-       WHERE call_id = $3
-         AND status NOT IN ('ended', 'declined', 'missed', 'failed')
-       RETURNING *`,
-      [finalStatus, durationSeconds, req.params.id]
+    const updatedCall = await queryOne<CallRow & { prev_status: string }>(
+      `WITH prev AS (
+         SELECT status FROM calls
+         WHERE call_id = $3
+           AND (caller_id = $2 OR callee_id = $2)
+           AND status NOT IN ('ended','declined','missed','failed')
+         FOR UPDATE
+       )
+       UPDATE calls SET
+         status = CASE WHEN prev.status = 'answered' THEN 'ended' ELSE $1 END,
+         ended_at = NOW(),
+         duration_seconds = CASE
+           WHEN started_at IS NOT NULL
+           THEN EXTRACT(EPOCH FROM (NOW() - started_at))::int
+           ELSE NULL
+         END
+       FROM prev
+       WHERE calls.call_id = $3
+       RETURNING calls.*, prev.status AS prev_status`,
+      [reason, req.user!.sub, req.params.id]
     );
 
     if (!updatedCall) {
-      throw new AppError(409, 'CALL_ALREADY_ENDED', 'Call has already ended.');
+      throw new AppError(409, 'CALL_ALREADY_ENDED', 'Call has already ended or was not found.');
     }
+
+    const call = updatedCall;
+    const finalStatus = updatedCall.status as string;
     const updated = updatedCall;
 
     // ── RTDB: signal the other device instantly ───────────────────────────────
     // This fires in < 100ms on the other device's active listener.
     // No polling needed anywhere in the app.
     rtdbUpdateStatus(req.params.id, finalStatus as any).catch(() => {});
+
+    // Send cancellation push to the other party so background/killed devices dismiss the notification
+    if (finalStatus === 'missed' || finalStatus === 'declined') {
+      const prevStatus = (updatedCall as any).prev_status as string;
+      if (prevStatus === 'ringing' || prevStatus === 'initiated') {
+        // The party who did NOT end the call needs the push
+        const notifyUserId = req.user!.sub === call.caller_id ? call.callee_id : call.caller_id;
+        setImmediate(async () => {
+          try {
+            const notifyUser = await queryOne<{ fcm_token: string | null }>(
+              `SELECT fcm_token FROM users WHERE user_id = $1`, [notifyUserId]
+            );
+            if (notifyUser?.fcm_token) {
+              await sendCallCancelledPush(notifyUser.fcm_token, req.params.id);
+            }
+          } catch { /* best effort */ }
+        });
+      }
+    }
 
     res.json({ ok: true, data: { call_id: updated.call_id, status: updated.status, duration_seconds: updated.duration_seconds } });
   } catch (err) {
@@ -455,7 +493,7 @@ callsRouter.post('/:id/livekit-token', requireAuth, async (req: Request, res: Re
     const at = new AccessToken(apiKey, apiSecret, {
       identity: req.user!.sub,
       name: user?.display_name ?? user?.handle ?? req.user!.sub,
-      ttl: '2h',
+      ttl: '15m',
     });
     at.addGrant({
       roomJoin: true,
@@ -511,7 +549,7 @@ callsRouter.get('/history', requireAuth, async (req: Request, res: Response, nex
     const limit = Math.min(parseInt(req.query.limit as string ?? '20'), 50);
     const offset = parseInt(req.query.offset as string ?? '0');
 
-    const rows = await query(
+    const rows = await query<{ total_count: number }>(
       `SELECT
          c.call_id, c.call_type, c.status, c.started_at, c.ended_at, c.duration_seconds,
          c.caller_id, c.callee_id,
@@ -519,7 +557,8 @@ callsRouter.get('/history', requireAuth, async (req: Request, res: Response, nex
          caller.avatar_url AS caller_avatar_url,
          callee.handle AS callee_handle, callee.display_name AS callee_name,
          callee.avatar_url AS callee_avatar_url,
-         CASE WHEN c.caller_id = $1 THEN 'outgoing' ELSE 'incoming' END AS direction
+         CASE WHEN c.caller_id = $1 THEN 'outgoing' ELSE 'incoming' END AS direction,
+         COUNT(*) OVER()::int AS total_count
        FROM calls c
        JOIN users caller ON caller.user_id = c.caller_id
        JOIN users callee ON callee.user_id = c.callee_id
@@ -529,7 +568,8 @@ callsRouter.get('/history', requireAuth, async (req: Request, res: Response, nex
       [req.user!.sub, limit, offset]
     );
 
-    res.json({ ok: true, data: rows });
+    const total = rows[0]?.total_count ?? 0;
+    res.json({ ok: true, data: rows, meta: { total, limit, offset } });
   } catch (err) {
     next(err);
   }
@@ -541,7 +581,8 @@ callsRouter.get('/:id', requireAuth, async (req: Request, res: Response, next: N
   try {
     const call = await queryOne(
       `SELECT
-         c.*,
+         c.call_id, c.call_type, c.status, c.started_at, c.ended_at, c.duration_seconds,
+         c.caller_id, c.callee_id, c.webrtc_room_id, c.channel_id, c.created_at,
          caller.handle       AS caller_handle,
          caller.display_name AS caller_name,
          caller.trust_tier   AS caller_trust_tier,
@@ -610,22 +651,18 @@ callsRouter.post('/:id/quality', requireAuth, async (req: Request, res: Response
       throw new AppError(409, 'CALL_NOT_ENDED', 'Quality reports are only accepted after a call ends.');
     }
 
-    // One report per participant per call — duplicate = 409
-    const existing = await queryOne(
-      `SELECT report_id FROM call_quality_reports WHERE call_id = $1 AND user_id = $2`,
-      [id, myId],
-    );
-    if (existing) {
-      throw new AppError(409, 'ALREADY_SUBMITTED', 'Quality report already submitted for this call.');
-    }
-
+    // One report per participant per call — duplicate = 409 (atomic upsert)
     const [report] = await query<{ report_id: string }>(
       `INSERT INTO call_quality_reports (call_id, user_id, mos_score, packet_loss_pct, jitter_ms, rtt_ms)
        VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (call_id, user_id) DO NOTHING
        RETURNING report_id`,
       [id, myId, metrics.mos_score ?? null, metrics.packet_loss_pct ?? null,
        metrics.jitter_ms ?? null, metrics.rtt_ms ?? null],
     );
+    if (!report) {
+      throw new AppError(409, 'ALREADY_SUBMITTED', 'Quality report already submitted for this call.');
+    }
 
     res.status(201).json({ ok: true, data: { report_id: report.report_id } });
   } catch (err) {

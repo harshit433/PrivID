@@ -15,13 +15,13 @@ function getMessaging(): admin.messaging.Messaging | null {
     return null;
   }
   try {
-    const serviceAccount = JSON.parse(raw);
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-      databaseURL:
-        process.env.FIREBASE_DATABASE_URL ??
-        'https://privid-cb3bf-default-rtdb.firebaseio.com',
-    });
+    if (admin.apps.length === 0) {
+      const serviceAccount = JSON.parse(raw);
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        databaseURL: process.env.FIREBASE_DATABASE_URL,
+      });
+    }
   } catch {
     _initialised = true;
     return null;

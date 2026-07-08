@@ -44,6 +44,7 @@ export async function withTransaction<T>(
   const client = await getPool().connect();
   try {
     await client.query('BEGIN');
+    await client.query("SET LOCAL statement_timeout = '10s'");
     const result = await fn(client);
     await client.query('COMMIT');
     return result;

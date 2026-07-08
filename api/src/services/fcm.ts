@@ -20,7 +20,11 @@ function getApp(): admin.app.App | null {
   if (_initialised) return admin.apps[0] ?? null;
 
   const raw    = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  const dbUrl  = process.env.FIREBASE_DATABASE_URL ?? 'https://privid-cb3bf-default-rtdb.firebaseio.com';
+  const dbUrl  = process.env.FIREBASE_DATABASE_URL;
+
+  if (!dbUrl) {
+    logger.warn('Firebase', 'FIREBASE_DATABASE_URL not set — RTDB signaling will be disabled');
+  }
 
   if (!raw) {
     logger.warn('Firebase', 'FIREBASE_SERVICE_ACCOUNT_JSON not set — FCM + RTDB disabled');
@@ -30,10 +34,12 @@ function getApp(): admin.app.App | null {
 
   try {
     const serviceAccount = JSON.parse(raw);
-    admin.initializeApp({
-      credential:  admin.credential.cert(serviceAccount),
-      databaseURL: dbUrl,
-    });
+    if (admin.apps.length === 0) {
+      admin.initializeApp({
+        credential:  admin.credential.cert(serviceAccount),
+        databaseURL: dbUrl,
+      });
+    }
     _initialised = true;
     logger.debug('Firebase', 'Admin SDK initialised (FCM + RTDB)');
     return admin.apps[0] ?? null;
@@ -389,12 +395,65 @@ export async function sendIncomingCallPush(
       },
       android: {
         priority: 'high',
-        ttl:      30_000,
+        ttl:      0,  // drop if not delivered immediately
+      },
+      apns: {
+        headers: {
+          'apns-priority':   '10',
+          'apns-push-type':  'background',
+        },
+        payload: {
+          aps: {
+            'content-available': 1,
+            sound: 'default',
+          },
+        },
       },
     });
     logger.debug('FCM', `Wakeup push sent → call ${payload.callId}`);
   } catch (err: any) {
-    logger.warn('FCM', `Push failed: ${err?.message}`);
+    const code: string = err?.errorInfo?.code ?? '';
+    if (
+      code === 'messaging/registration-token-not-registered' ||
+      code === 'messaging/invalid-registration-token'
+    ) {
+      // Purge the stale token so future calls don't silently fail
+      try {
+        const { query: dbQuery } = await import('@trustroute/shared');
+        await dbQuery(`UPDATE users SET fcm_token = NULL WHERE fcm_token = $1`, [fcmToken]);
+      } catch { /* best effort */ }
+    }
+    logger.warn('FCM', `Push failed (${code || 'unknown'}): ${err?.message}`);
+  }
+}
+
+// ── FCM — Call cancelled push ─────────────────────────────────────────────────
+
+export async function sendCallCancelledPush(fcmToken: string, callId: string): Promise<void> {
+  const app = getApp();
+  if (!app) return;
+  try {
+    await app.messaging().send({
+      token:   fcmToken,
+      data:    { type: 'call_cancelled', call_id: callId },
+      android: { priority: 'high', ttl: 0 },
+      apns: {
+        headers: { 'apns-priority': '10', 'apns-push-type': 'background' },
+        payload: { aps: { 'content-available': 1 } },
+      },
+    });
+  } catch (err: any) {
+    const code: string = err?.errorInfo?.code ?? '';
+    if (
+      code === 'messaging/registration-token-not-registered' ||
+      code === 'messaging/invalid-registration-token'
+    ) {
+      try {
+        const { query: dbQuery } = await import('@trustroute/shared');
+        await dbQuery(`UPDATE users SET fcm_token = NULL WHERE fcm_token = $1`, [fcmToken]);
+      } catch { /* best effort */ }
+    }
+    logger.warn('FCM', `call_cancelled push failed: ${err?.message}`);
   }
 }
 

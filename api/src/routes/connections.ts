@@ -10,9 +10,17 @@ export const connectionsRouter = Router();
 
 // ─── GET /connections ─────────────────────────────────────────────────────────
 
+const connectionTypeSchema = z.enum(['unknown', 'temporary', 'trusted', 'blocked']).optional();
+
 connectionsRouter.get('/', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const typeFilter = req.query.type as string | undefined;
+    const typeFilterResult = connectionTypeSchema.safeParse(req.query.type);
+    if (!typeFilterResult.success) {
+      return next(new AppError(400, 'VALIDATION_ERROR', 'Invalid type filter. Must be one of: unknown, temporary, trusted, blocked.'));
+    }
+    const typeFilter = typeFilterResult.data;
+    const limit  = 500;
+    const offset = Math.max(0, parseInt((req.query.offset as string) ?? '0', 10) || 0);
 
     const rows = await query(
       `SELECT
@@ -35,8 +43,9 @@ connectionsRouter.get('/', requireAuth, async (req: Request, res: Response, next
        LEFT JOIN connections r ON r.owner_id = c.contact_id AND r.contact_id = c.owner_id
        WHERE c.owner_id = $1
          ${typeFilter ? 'AND c.connection_type = $2' : ''}
-       ORDER BY COALESCE(NULLIF(TRIM(c.contact_name), ''), u.display_name) ASC`,
-      typeFilter ? [req.user!.sub, typeFilter] : [req.user!.sub]
+       ORDER BY COALESCE(NULLIF(TRIM(c.contact_name), ''), u.display_name) ASC
+       LIMIT ${limit} OFFSET ${typeFilter ? '$3' : '$2'}`,
+      typeFilter ? [req.user!.sub, typeFilter, offset] : [req.user!.sub, offset]
     );
 
     res.json({ ok: true, data: rows });

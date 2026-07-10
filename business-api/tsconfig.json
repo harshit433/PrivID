@@ -4,15 +4,11 @@
     "module": "CommonJS",
     "lib": ["ES2022"],
     "outDir": "./dist",
-    "rootDirs": ["./src", "../shared/src"],
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "resolveJsonModule": true,
-    "paths": {
-      "@trustroute/shared": ["../shared/src/index.ts"]
-    }
+    "resolveJsonModule": true
   },
-  "include": ["src/**/*", "../shared/src/**/*"],
+  "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
 }

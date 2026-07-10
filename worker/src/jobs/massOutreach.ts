@@ -21,6 +21,12 @@ export function startMassOutreachWorker() {
     async (job: Job<MassOutreachJob>) => {
       const { user_id } = job.data;
 
+      const [simUser] = await query<{ handle: string }>(
+        `SELECT handle FROM users WHERE user_id = $1`,
+        [user_id],
+      );
+      if (simUser?.handle?.startsWith('tsim_')) return;
+
       const [stats] = await query<{
         unique_callees: string;
         total_calls: string;
@@ -86,8 +92,11 @@ export function startMassOutreachWorker() {
  */
 export async function enqueueMassOutreachScan() {
   const activeCallers = await query<{ caller_id: string }>(
-    `SELECT DISTINCT caller_id FROM calls
-     WHERE created_at > NOW() - INTERVAL '90 minutes'`
+    `SELECT DISTINCT c.caller_id
+       FROM calls c
+       JOIN users u ON u.user_id = c.caller_id
+      WHERE c.created_at > NOW() - INTERVAL '90 minutes'
+        AND u.handle NOT LIKE 'tsim_%'`
   );
 
   for (const { caller_id } of activeCallers) {

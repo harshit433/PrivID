@@ -16,6 +16,9 @@ COPY shared ./shared
 COPY worker ./worker
 COPY db ./db
 
+WORKDIR /app
+RUN npm run build --workspace=@trustroute/shared
+
 WORKDIR /app/worker
 RUN npm run build
 

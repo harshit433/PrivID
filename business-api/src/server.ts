@@ -22,7 +22,7 @@ if (fs.existsSync(envPath)) {
 }
 
 const app = express();
-const PORT = parseInt(process.env.BUSINESS_API_PORT ?? '3002', 10);
+const PORT = parseInt(process.env.PORT ?? process.env.BUSINESS_API_PORT ?? '3002', 10);
 
 app.use(helmet());
 app.use(cors({ origin: true, credentials: true }));

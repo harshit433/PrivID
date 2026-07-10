@@ -61,6 +61,7 @@ export async function runAutoMLFeedback(): Promise<{ processed: number; skipped:
         AND c.updated_at > NOW() - ($1 || ' days')::INTERVAL
         AND u.is_active = TRUE
         AND u.is_under_review = FALSE   -- already being reviewed; skip
+        AND u.handle NOT LIKE 'tsim_%'  -- skip time-series simulation accounts
       GROUP BY c.contact_id, u.trust_score, u.is_monitored
       HAVING COUNT(DISTINCT c.owner_id) >= CASE WHEN u.is_monitored THEN 5 ELSE $2 END`,
     [WINDOW_DAYS, BLOCK_THRESHOLD],

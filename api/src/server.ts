@@ -13,6 +13,7 @@ import { chatRouter } from './routes/chat';
 import { trustRouter } from './routes/trust';
 import { livenessRouter } from './routes/liveness';
 import { simulationRouter } from './routes/simulation';
+import { timeseriesRouter } from './routes/timeseriesSim';
 import { numbersRouter } from './routes/numbers';
 import { statusRouter } from './routes/status';
 import { subscriptionsRouter } from './routes/subscriptions';
@@ -40,7 +41,7 @@ import {
 import { logger } from './utils/logger';
 
 const app = express();
-const PORT = parseInt(process.env.API_PORT ?? '3000', 10);
+const PORT = parseInt(process.env.PORT ?? process.env.API_PORT ?? '3000', 10);
 const JSON_LIMIT_DEFAULT = process.env.EXPRESS_JSON_LIMIT ?? '1mb';
 const JSON_LIMIT_LARGE = process.env.EXPRESS_JSON_LARGE_LIMIT ?? '15mb';
 
@@ -60,12 +61,21 @@ const ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS ?? '')
   .map((o) => o.trim())
   .filter(Boolean);
 
+// Browser requests from our own hosted pages (e.g. simulation live dashboard) send
+// an Origin header matching the API host — allow without adding to the allowlist.
+const SELF_ORIGINS = [
+  process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : null,
+  process.env.API_BASE_URL?.replace(/\/$/, '') ?? null,
+].filter((o): o is string => Boolean(o));
+
 app.use(cors({
   origin: (origin, callback) => {
     // Mobile apps send no Origin header — always allow
     if (!origin) return callback(null, true);
     // In dev, allow everything
     if (process.env.NODE_ENV !== 'production') return callback(null, true);
+    // Same-origin browser traffic to this API (simulation dashboard, etc.)
+    if (SELF_ORIGINS.includes(origin)) return callback(null, true);
     // In prod, require explicit allowlist via env var
     if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
     callback(new Error(`CORS: origin ${origin} not allowed`));
@@ -84,6 +94,7 @@ app.use((req, res, next) => {
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
 // ─── Health ───────────────────────────────────────────────────────────────────
+app.get('/favicon.ico', (_req, res) => res.status(204).end());
 app.get('/health', async (_req, res) => {
   try {
     await getPool().query('SELECT 1');
@@ -193,8 +204,11 @@ app.use('/numbers', apiLimiter, numbersRouter);
 app.use('/admin', publicLimiter, adminRouter);
 // Business suite (API key auth) — same routes as business-api :3002
 mountBusinessSuite(app);
-if (process.env.NODE_ENV !== 'production') {
+// Simulation routes are non-production only, but can be enabled in production
+// on demand (e.g. to generate ML training data) via ENABLE_SIMULATION=true.
+if (process.env.NODE_ENV !== 'production' || process.env.ENABLE_SIMULATION === 'true') {
   app.use('/simulation', simulationRouter);
+  app.use('/simulation/timeseries', timeseriesRouter);
 }
 
 // ─── Error handler ────────────────────────────────────────────────────────────

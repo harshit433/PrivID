@@ -377,7 +377,8 @@ export async function bulkComputeScores(userIds: string[]): Promise<Array<{
   return userIds.map(uid => {
     const verPts = verMap.get(uid) ?? 0;
     const mlDelta = mlMap.get(uid) ?? 0;
-    const computed_score = Math.max(0, Math.min(100, verPts + mlDelta));
+    // trust_score is an INTEGER column (0–100); round so the DB cast never sees a float.
+    const computed_score = Math.round(Math.max(0, Math.min(100, verPts + mlDelta)));
     return { user_id: uid, computed_score, tier: scoreToTier(computed_score) };
   });
 }

@@ -26,6 +26,7 @@ import {
   clampScore,
   getRedis,
   keys,
+  query,
 } from '@trustroute/shared';
 import type { UserRow, TrustTier } from '@trustroute/shared';
 import type { TrustRecomputeJob } from '../queues';
@@ -163,6 +164,12 @@ export function startTrustRecomputeWorker() {
     JOB,
     async (job: Job<TrustRecomputeJob>) => {
       const { user_id, reason } = job.data;
+
+      const [simUser] = await query<{ handle: string }>(
+        `SELECT handle FROM users WHERE user_id = $1`,
+        [user_id],
+      );
+      if (simUser?.handle?.startsWith('tsim_')) return;
 
       logger.info(JOB, 'Processing job', {
         user_id,

@@ -106,12 +106,35 @@ function client(cfg: DgConfig): AxiosInstance {
 
 function toDigilockerError(err: unknown, fallbackCode = 'DIGILOCKER_ERROR'): DigilockerError {
   if (err instanceof DigilockerError) return err;
-  const ax = err as { response?: { status?: number; data?: { error?: { detail?: string; code?: string } } }; message?: string; code?: string };
+  const ax = err as {
+    response?: {
+      status?: number;
+      data?: {
+        error?: { detail?: string; code?: string; message?: string };
+        message?: string;
+        traceId?: string;
+      };
+    };
+    message?: string;
+    code?: string;
+  };
   const status = ax.response?.status ?? 502;
-  const detail = ax.response?.data?.error?.detail ?? ax.message ?? 'DigiLocker request failed';
-  const code = ax.response?.data?.error?.code ?? (ax.code === 'ECONNABORTED' ? 'DIGILOCKER_TIMEOUT' : fallbackCode);
-  // PII-safe: never log names/documents — only provider status/code.
-  logger.warn(JOB, 'DigiLocker call failed', { status, code });
+  const data = ax.response?.data;
+  const detail =
+    data?.error?.detail ??
+    data?.error?.message ??
+    data?.message ??
+    ax.message ??
+    'DigiLocker request failed';
+  const code = data?.error?.code ?? (ax.code === 'ECONNABORTED' ? 'DIGILOCKER_TIMEOUT' : fallbackCode);
+  // PII-safe: never log names/documents — only provider status/code/trace.
+  logger.warn(JOB, 'DigiLocker call failed', {
+    status,
+    code,
+    detail: String(detail).slice(0, 200),
+    traceId: data?.traceId,
+    clientIdPrefix: (process.env.SETU_DG_CLIENT_ID ?? '').slice(0, 8),
+  });
   return new DigilockerError(detail, code, status >= 500 || status === 0 ? 502 : status);
 }
 
@@ -119,9 +142,10 @@ function toDigilockerError(err: unknown, fallbackCode = 'DIGILOCKER_ERROR'): Dig
 export async function createDigilockerRequest(): Promise<DigilockerRequest> {
   const cfg = getConfig();
   try {
+    // Match Setu docs / Bridge curl: redirectUrl is required; docType is optional.
+    // Sending an unsupported docType on some product instances returns 403.
     const { data } = await client(cfg).post('/api/digilocker', {
       redirectUrl: cfg.redirectUrl,
-      docType: 'AADHAAR',
     });
     const req = data as { id: string; url: string; status: string; validUpto?: string };
     if (!req?.id || !req?.url) {

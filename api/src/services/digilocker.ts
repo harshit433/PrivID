@@ -1,5 +1,6 @@
-import https from 'https';
+import { execFile } from 'child_process';
 import { createHash } from 'crypto';
+import { promisify } from 'util';
 import { logger } from '../utils/logger';
 
 /**
@@ -19,22 +20,26 @@ import { logger } from '../utils/logger';
  *   SETU_DG_REDIRECT_URL         public HTTPS return URL after DigiLocker consent
  *                                (prod: https://www.trustroute.live/digilocker/)
  *
+ * Transport note: Setu’s edge returns a bare nginx 403 to some Node TLS
+ * fingerprints from cloud egress. We call Setu via `curl` (same as Bridge docs).
+ *
  * If the credentials are absent we throw a typed `DIGILOCKER_NOT_CONFIGURED`
  * error (a real, explicit "not set up" — never a fake success).
  */
 
 const JOB = 'digilocker';
+const execFileAsync = promisify(execFile);
 
 export type DigilockerStatus =
-  | 'unauthenticated' // request created, user hasn't consented yet
-  | 'authenticated'   // user consented; data can be fetched
+  | 'unauthenticated'
+  | 'authenticated'
   | 'expired'
   | 'revoked'
   | 'error';
 
 export interface DigilockerRequest {
-  id: string;            // Setu request id (our provider_ref)
-  url: string;           // hosted DigiLocker consent URL to open in a browser/WebView
+  id: string;
+  url: string;
   status: DigilockerStatus;
   validUpto?: string;
 }
@@ -44,9 +49,8 @@ export interface DigilockerAadhaar {
   dob?: string;
   gender?: string;
   address?: string;
-  maskedNumber?: string; // e.g. XXXXXXXX1234 — DigiLocker never exposes the full number
-  photoBase64?: string;  // for downstream liveness face-match / dedup
-  /** Stable identity fingerprint (no raw Aadhaar): sha256(maskedNumber|name|dob). */
+  maskedNumber?: string;
+  photoBase64?: string;
   docHash: string;
 }
 
@@ -83,7 +87,7 @@ function getConfig(): DgConfig {
     );
   }
   return {
-    baseUrl: (process.env.SETU_DG_BASE_URL?.trim().replace(/\/$/, '') || 'https://dg-sandbox.setu.co'),
+    baseUrl: process.env.SETU_DG_BASE_URL?.trim().replace(/\/$/, '') || 'https://dg-sandbox.setu.co',
     clientId,
     clientSecret,
     productInstanceId,
@@ -91,67 +95,76 @@ function getConfig(): DgConfig {
   };
 }
 
-/** Prefer IPv4 — some hosts (incl. Setu from cloud egress) mishandle IPv6 and return opaque 403s. */
-const ipv4Agent = new https.Agent({ family: 4, keepAlive: true });
-
 async function setuRequest<T>(
   cfg: DgConfig,
   method: 'GET' | 'POST',
   path: string,
   body?: Record<string, unknown>,
 ): Promise<T> {
-  const url = new URL(path, `${cfg.baseUrl}/`);
-  const payload = body ? JSON.stringify(body) : undefined;
+  const url = `${cfg.baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+  const args = [
+    '-sS',
+    '-o',
+    '-',
+    '-w',
+    '\n__HTTP_CODE__:%{http_code}',
+    '--max-time',
+    '20',
+    '-X',
+    method,
+    url,
+    '-H',
+    'Accept: application/json',
+    '-H',
+    'Content-Type: application/json',
+    '-H',
+    `x-client-id: ${cfg.clientId}`,
+    '-H',
+    `x-client-secret: ${cfg.clientSecret}`,
+    '-H',
+    `x-product-instance-id: ${cfg.productInstanceId}`,
+  ];
+  if (body) {
+    args.push('-d', JSON.stringify(body));
+  }
 
-  const res = await new Promise<{ status: number; text: string }>((resolve, reject) => {
-    const req = https.request(
-      {
-        protocol: url.protocol,
-        hostname: url.hostname,
-        port: url.port || 443,
-        path: `${url.pathname}${url.search}`,
-        method,
-        agent: ipv4Agent,
-        timeout: 20_000,
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-          'x-client-id': cfg.clientId,
-          'x-client-secret': cfg.clientSecret,
-          'x-product-instance-id': cfg.productInstanceId,
-          ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
-        },
-      },
-      (incoming) => {
-        const chunks: Buffer[] = [];
-        incoming.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
-        incoming.on('end', () => {
-          resolve({
-            status: incoming.statusCode ?? 0,
-            text: Buffer.concat(chunks).toString('utf8'),
-          });
-        });
-      },
-    );
-    req.on('timeout', () => {
-      req.destroy();
-      reject(Object.assign(new Error('DigiLocker request timed out'), { code: 'ECONNABORTED' }));
-    });
-    req.on('error', reject);
-    if (payload) req.write(payload);
-    req.end();
-  });
-
-  let data: unknown = null;
-  if (res.text) {
-    try {
-      data = JSON.parse(res.text);
-    } catch {
-      data = { message: res.text.slice(0, 300) };
+  let stdout = '';
+  try {
+    const result = await execFileAsync('curl', args, { timeout: 25_000, maxBuffer: 2_000_000 });
+    stdout = String(result.stdout || '');
+  } catch (err) {
+    const e = err as { code?: string; message?: string; stdout?: string; stderr?: string };
+    stdout = String(e.stdout || '');
+    if (!stdout) {
+      logger.warn(JOB, 'DigiLocker curl failed', {
+        status: 0,
+        code: e.code,
+        detail: (e.stderr || e.message || '').slice(0, 200),
+        clientIdPrefix: cfg.clientId.slice(0, 8),
+      });
+      throw new DigilockerError(
+        e.message || 'DigiLocker request failed',
+        e.code === 'ETIMEDOUT' ? 'DIGILOCKER_TIMEOUT' : 'DIGILOCKER_ERROR',
+        e.code === 'ETIMEDOUT' ? 504 : 502,
+      );
     }
   }
 
-  if (res.status < 200 || res.status >= 300) {
+  const marker = '\n__HTTP_CODE__:';
+  const idx = stdout.lastIndexOf(marker);
+  const text = idx >= 0 ? stdout.slice(0, idx) : stdout;
+  const status = idx >= 0 ? Number(stdout.slice(idx + marker.length).trim()) : 0;
+
+  let data: unknown = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { message: text.slice(0, 300) };
+    }
+  }
+
+  if (status < 200 || status >= 300) {
     const parsed = (data ?? {}) as {
       error?: { detail?: string; code?: string; message?: string };
       message?: string;
@@ -161,28 +174,26 @@ async function setuRequest<T>(
       parsed.error?.detail ??
       parsed.error?.message ??
       parsed.message ??
-      `DigiLocker HTTP ${res.status}`;
+      `DigiLocker HTTP ${status}`;
     const code = parsed.error?.code ?? 'DIGILOCKER_HTTP_ERROR';
     logger.warn(JOB, 'DigiLocker call failed', {
-      status: res.status,
+      status,
       code,
       detail: String(detail).slice(0, 200),
-      body: res.text.slice(0, 300),
+      body: text.slice(0, 300),
       traceId: parsed.traceId,
       clientIdPrefix: cfg.clientId.slice(0, 8),
-      host: url.hostname,
+      host: cfg.baseUrl,
     });
-    throw new DigilockerError(String(detail), code, res.status >= 500 || res.status === 0 ? 502 : res.status);
+    throw new DigilockerError(String(detail), code, status >= 500 || status === 0 ? 502 : status);
   }
 
   return data as T;
 }
 
-/** Create a DigiLocker request → returns the hosted consent URL + our provider ref. */
 export async function createDigilockerRequest(): Promise<DigilockerRequest> {
   const cfg = getConfig();
   try {
-    // Match Setu Bridge docs: only redirectUrl is required.
     const data = await setuRequest<{ id: string; url: string; status: string; validUpto?: string }>(
       cfg,
       'POST',
@@ -201,16 +212,10 @@ export async function createDigilockerRequest(): Promise<DigilockerRequest> {
     };
   } catch (err) {
     if (err instanceof DigilockerError) throw err;
-    const e = err as { code?: string; message?: string };
-    if (e.code === 'ECONNABORTED') {
-      throw new DigilockerError('DigiLocker request timed out', 'DIGILOCKER_TIMEOUT', 504);
-    }
-    logger.warn(JOB, 'DigiLocker call failed', { status: 0, code: e.code, detail: e.message });
-    throw new DigilockerError(e.message ?? 'DigiLocker request failed', 'DIGILOCKER_CREATE_FAILED', 502);
+    throw new DigilockerError('DigiLocker create failed', 'DIGILOCKER_CREATE_FAILED', 502);
   }
 }
 
-/** Poll the request status; `authenticated` means the user consented on DigiLocker. */
 export async function getDigilockerStatus(id: string): Promise<DigilockerStatus> {
   const cfg = getConfig();
   try {
@@ -226,7 +231,6 @@ export async function getDigilockerStatus(id: string): Promise<DigilockerStatus>
   }
 }
 
-/** Fetch the government-verified Aadhaar profile once the request is authenticated. */
 export async function fetchAadhaar(id: string): Promise<DigilockerAadhaar> {
   const cfg = getConfig();
   try {
@@ -235,7 +239,6 @@ export async function fetchAadhaar(id: string): Promise<DigilockerAadhaar> {
       'GET',
       `/api/digilocker/${encodeURIComponent(id)}/aadhaar`,
     );
-    // Setu wraps the KYC payload under `aadhaar` (fields per Setu DigiLocker docs).
     const a = data.aadhaar ?? data;
     const legalName = String(a.name ?? a.fullName ?? '').trim();
     if (!legalName) {

@@ -3,14 +3,15 @@ import { z } from 'zod';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 import {
+  getReferralHome,
   getReferralSummary,
-  requestWithdrawal,
+  listMyReferrals,
+  getReferralWallet,
+  convertToCallBalance,
   validateReferralCode,
 } from '../services/referrals';
 
 export const referralsRouter = Router();
-
-// ─── GET /referrals/me ────────────────────────────────────────────────────────
 
 referralsRouter.get('/me', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -21,17 +22,32 @@ referralsRouter.get('/me', requireAuth, async (req: Request, res: Response, next
   }
 });
 
-// ─── POST /referrals/validate ─────────────────────────────────────────────────
-
-const validateSchema = z.object({
-  code: z.string().min(1).max(32),
+referralsRouter.get('/', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const data = await listMyReferrals(req.user!.sub);
+    res.json({ ok: true, data });
+  } catch (err) {
+    next(err);
+  }
 });
 
-referralsRouter.post('/validate', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+referralsRouter.get('/wallet', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { code } = validateSchema.parse(req.body);
-    const result = await validateReferralCode(code, req.user!.sub);
-    res.json({ ok: true, data: result });
+    const data = await getReferralWallet(req.user!.sub);
+    res.json({ ok: true, data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const convertSchema = z.object({ amount_paise: z.number().int().positive() });
+
+referralsRouter.post('/wallet/convert', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { amount_paise } = convertSchema.parse(req.body);
+    await convertToCallBalance(req.user!.sub, amount_paise);
+    const data = await getReferralHome(req.user!.sub);
+    res.json({ ok: true, data });
   } catch (err) {
     if (err instanceof z.ZodError) {
       return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0]!.message));
@@ -40,18 +56,13 @@ referralsRouter.post('/validate', requireAuth, async (req: Request, res: Respons
   }
 });
 
-// ─── POST /referrals/withdraw ─────────────────────────────────────────────────
+const validateSchema = z.object({ code: z.string().min(1).max(32) });
 
-const withdrawSchema = z.object({
-  amount_paise: z.number().int().positive(),
-  upi_id: z.string().min(3).max(100),
-});
-
-referralsRouter.post('/withdraw', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+referralsRouter.post('/validate', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const body = withdrawSchema.parse(req.body);
-    const data = await requestWithdrawal(req.user!.sub, body.amount_paise, body.upi_id);
-    res.json({ ok: true, data });
+    const { code } = validateSchema.parse(req.body);
+    const result = await validateReferralCode(code, req.user!.sub);
+    res.json({ ok: true, data: result });
   } catch (err) {
     if (err instanceof z.ZodError) {
       return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0]!.message));

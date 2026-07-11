@@ -6,6 +6,9 @@ export type CallType = 'direct' | 'reachability';
 export type CallStatus = 'initiated' | 'ringing' | 'answered' | 'ended' | 'missed' | 'declined' | 'failed';
 export type VerificationStatus = 'pending' | 'completed' | 'failed' | 'expired';
 export type ChannelStatus = 'active' | 'expired' | 'revoked';
+export type IdentityStatus = 'active' | 'self_deleted' | 'suspended' | 'banned' | 'ousted';
+export type AccountStatus = 'active' | 'under_review' | 'restricted' | 'suspended' | 'banned' | 'ousted' | 'self_deleted';
+export type AppealStatus = 'submitted' | 'in_review' | 'restored' | 'upheld' | 'rejected';
 
 // ─── JWT Payload ──────────────────────────────────────────────────────────────
 
@@ -21,7 +24,9 @@ export interface AccessTokenPayload {
 
 export interface UserRow {
   user_id: string;
-  phone_e164: string;
+  identity_id: string | null;
+  phone_e164: string | null;
+  phone_hash: string | null;
   handle: string;
   display_name: string | null;
   avatar_url: string | null;
@@ -37,6 +42,74 @@ export interface UserRow {
   is_under_review: boolean;
   review_reason: string | null;
   review_started_at: Date | null;
+  call_restriction_until: Date | null;
+  is_monitored: boolean;
+  warning_count: number;
+  account_status: AccountStatus;
+  account_status_reason: string | null;
+  account_status_updated_at: Date;
+  deleted_at: Date | null;
+  suspended_at: Date | null;
+  banned_at: Date | null;
+  legal_name: string | null;
+  kyc_status: 'none' | 'pending' | 'verified' | string;
+  kyc_provider: string | null;
+  kyc_doc_hash: string | null;
+  kyc_verified_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface IdentityRow {
+  identity_id: string;
+  legal_name: string;
+  doc_type: string;
+  doc_hash: string;
+  provider: string;
+  provider_ref: string | null;
+  face_ref: string | null;
+  status: IdentityStatus;
+  current_user_id: string | null;
+  last_handle: string | null;
+  status_reason: string | null;
+  banned_reason: string | null;
+  deleted_at: Date | null;
+  suspended_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface OnboardingSessionRow {
+  session_id: string;
+  purpose: 'signup' | 'recovery';
+  status: string;
+  device_fingerprint_hash: string | null;
+  integrity_verdict: Record<string, unknown>;
+  digilocker_provider_ref: string | null;
+  liveness_provider_ref: string | null;
+  legal_name: string | null;
+  doc_type: string | null;
+  doc_hash: string | null;
+  identity_id: string | null;
+  matched_user_id: string | null;
+  branch: 'new' | 'self_deleted' | 'active' | 'suspended' | 'banned' | 'ousted' | 'no_match' | null;
+  selected_handle: string | null;
+  expires_at: Date;
+  completed_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export interface AccountAppealRow {
+  appeal_id: string;
+  user_id: string | null;
+  identity_id: string | null;
+  status: AppealStatus;
+  reason: string;
+  evidence: string | null;
+  resolution: string | null;
+  resolved_by: string | null;
+  resolved_at: Date | null;
   created_at: Date;
   updated_at: Date;
 }

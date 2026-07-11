@@ -36,6 +36,12 @@ import {
   enqueueDueScheduledBusinessMessages,
 } from './jobs/businessMessageDeliver';
 import { startRingTimeoutWorker } from './jobs/ringTimeout';
+import {
+  startReferralQualificationWorker,
+  enqueueReferralQualificationScan,
+} from './jobs/referralQualification';
+import { startHandlePropagationWorker, enqueueHandlePropagationScan } from './jobs/handlePropagation';
+import { startDataExportWorker } from './jobs/dataExport';
 import { isMLAvailable } from './utils/mlClient';
 import { logger } from './utils/logger';
 
@@ -63,6 +69,9 @@ async function main() {
     startStatusExpiryWorker(),
     startBusinessMessageDeliverWorker(),
     startRingTimeoutWorker(),
+    startReferralQualificationWorker(),
+    startHandlePropagationWorker(),
+    startDataExportWorker(),
   ];
 
   logger.info(WORKER, `${workers.length} workers running`);
@@ -75,6 +84,8 @@ async function main() {
     enqueueMLFeedbackScan(),
     enqueueStatusExpiryScan(),
     enqueueDueScheduledBusinessMessages(),
+    enqueueReferralQualificationScan(),
+    enqueueHandlePropagationScan(),
   ]);
 
   // ── Cron ticks ───────────────────────────────────────────────────────────
@@ -94,6 +105,9 @@ async function main() {
   cron('business scheduled msgs', enqueueDueScheduledBusinessMessages, 60 * 1_000);
   cron('ml-feedback scan',        enqueueMLFeedbackScan,        6  * 60 * 60 * 1_000);
   cron('token cleanup',           enqueueTokenRotation,         24 * 60 * 60 * 1_000);
+
+  cron('referral qualification', enqueueReferralQualificationScan, 24 * 60 * 60 * 1_000);
+  cron('handle propagation', enqueueHandlePropagationScan, 5 * 60 * 1_000);
 
   // Shadow recompute runs nightly at 02:00 UTC (approximate — checked every hour)
   scheduleNightly(2, enqueueShadowRecompute, 'shadow-recompute');

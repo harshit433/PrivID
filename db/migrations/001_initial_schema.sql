@@ -92,9 +92,9 @@ CREATE INDEX IF NOT EXISTS idx_devices_user ON device_registrations (user_id);
 CREATE TABLE IF NOT EXISTS trust_factors (
   factor_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id         UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-  factor_type     TEXT NOT NULL,          -- 'phone_verified', 'liveness', 'govt_id', 'play_integrity', etc.
+  factor_type     TEXT NOT NULL,          -- e.g. 'govt_id_verified', 'liveness_check', 'profile_complete'
   status          verification_status NOT NULL DEFAULT 'pending',
-  provider        TEXT,                   -- 'msg91', 'onfido', 'setu', 'play_integrity'
+  provider        TEXT,                   -- e.g. 'setu', 'luxand', 'internal'
   provider_ref    TEXT,                   -- external verification ID
   score_delta     INTEGER NOT NULL DEFAULT 0,
   verified_at     TIMESTAMPTZ,

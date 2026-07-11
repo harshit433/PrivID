@@ -15,8 +15,10 @@ import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import fs from 'fs';
 import path from 'path';
-import { AccessTokenPayload, getRedis, query, keys } from '@trustroute/shared';
+import { AccessTokenPayload, getRedis, query, queryOne, keys } from '@trustroute/shared';
+import type { UserRow } from '@trustroute/shared';
 import { AppError } from './errorHandler';
+import { assertCanAuthenticate } from '../services/accountState';
 
 // ─── JWT key loading ──────────────────────────────────────────────────────────
 
@@ -78,7 +80,7 @@ function touchPresence(userId: string): void {
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
-export function requireAuth(req: Request, _res: Response, next: NextFunction) {
+export async function requireAuth(req: Request, _res: Response, next: NextFunction) {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) {
     return next(new AppError(401, 'UNAUTHORIZED', 'Missing access token.'));
@@ -89,6 +91,19 @@ export function requireAuth(req: Request, _res: Response, next: NextFunction) {
     const payload = jwt.verify(token, getPublicKey(), {
       algorithms: ['RS256'],
     }) as AccessTokenPayload;
+
+    const user = await queryOne<Pick<UserRow,
+      'account_status' | 'is_active' | 'is_under_review' | 'call_restriction_until'
+    >>(
+      `SELECT user_id, account_status, is_active, is_under_review, call_restriction_until
+         FROM users
+        WHERE user_id = $1`,
+      [payload.sub],
+    );
+    if (!user) {
+      return next(new AppError(401, 'USER_INACTIVE', 'Account not found or inactive.'));
+    }
+    assertCanAuthenticate(user);
 
     req.user = payload;
 

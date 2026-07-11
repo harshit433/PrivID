@@ -425,7 +425,13 @@ export async function recomputeAndPersist(userId: string): Promise<TrustBreakdow
         reason = `Score dropped to ${breakdown.total} — abnormal behavioral pattern detected by ML.`;
       }
       await client.query(
-        `UPDATE users SET is_under_review = true, review_reason = $1, review_started_at = NOW()
+        `UPDATE users
+            SET is_under_review = true,
+                account_status = 'under_review',
+                account_status_reason = $1,
+                account_status_updated_at = NOW(),
+                review_reason = $1,
+                review_started_at = NOW()
          WHERE user_id = $2`,
         [reason, userId],
       );

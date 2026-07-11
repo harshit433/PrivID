@@ -74,3 +74,26 @@ export const callLimiter = rateLimit({
   errorCode: 'CALL_RATE_LIMITED',
   errorMessage: 'You are initiating calls too quickly. Please wait a moment.',
 });
+
+/** 40 chat sends / minute per user (REST + WS share Redis counter). */
+export const chatSendLimiter = rateLimit({
+  keyFn: (req) => `chat-send:${req.user?.sub ?? req.ip}`,
+  windowSeconds: 60,
+  maxRequests: 40,
+  errorCode: 'CHAT_RATE_LIMITED',
+  errorMessage: 'You are sending messages too quickly. Please slow down.',
+});
+
+export async function checkChatSendRate(userId: string): Promise<void> {
+  try {
+    const redis = getRedis();
+    const key = `rl:chat-send:${userId}`;
+    const count = (await redis.eval(INCR_WITH_EXPIRE, 1, key, '60')) as number;
+    if (count > 40) {
+      throw new AppError(429, 'CHAT_RATE_LIMITED', 'You are sending messages too quickly. Please slow down.');
+    }
+  } catch (e) {
+    if (e instanceof AppError) throw e;
+    // Redis down — fail open
+  }
+}

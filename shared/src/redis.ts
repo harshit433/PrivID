@@ -65,18 +65,10 @@ export async function connectRedis(maxAttempts = 30, delayMs = 2_000): Promise<v
 
 // Key helpers — centralized so nothing is spelled inconsistently
 export const keys = {
-  otpSession: (sessionId: string) => `otp:session:${sessionId}`,
   refreshToken: (tokenHash: string) => `refresh:${tokenHash}`,
-  rateLimitOtp: (phone: string) => `ratelimit:otp:${phone}`,
   rateLimitCall: (userId: string, targetId: string) => `ratelimit:call:${userId}:${targetId}`,
   reachabilityToken: (token: string) => `reach:token:${token}`,
   userSession: (userId: string) => `user:session:${userId}`,
-  /** Pending MSG91 signup after OTP verified (handle not chosen yet). TTL ~15 min. */
-  msg91SignupPending: (signupToken: string) => `msg91:signup:${signupToken}`,
-  /** SIM SMS binding challenge for authenticated user. TTL 2 min. */
-  simSmsChallenge: (userId: string) => `sim_sms:${userId}`,
-  /** SIM SMS send counter — per user, only incremented after successful delivery. TTL 15 min. */
-  rateLimitSimSms: (userId: string) => `ratelimit:sim_sms:${userId}`,
   /**
    * Presence heartbeat debounce — written with NX + 120 s TTL.
    * If SET returns OK, the caller should also write last_seen_at to PostgreSQL.

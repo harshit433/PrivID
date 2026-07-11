@@ -7,6 +7,7 @@ import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 import { generateAvatarUploadUrl, uploadAvatarBuffer } from '../services/s3';
 import { issueBusinessQrToken } from '../services/businessQr';
+import { selfDeleteAccount } from '../services/accountDelete';
 
 export const usersRouter = Router();
 
@@ -16,7 +17,7 @@ usersRouter.get('/me', requireAuth, async (req: Request, res: Response, next: Ne
   try {
     const user = await queryOne<UserRow>(
       `SELECT user_id, handle, display_name, avatar_url, trust_tier, trust_score,
-              phone_e164, email, profession, bio, business_info,
+              identity_id, account_status, legal_name, phone_e164, email, profession, bio, business_info,
               onboarding_complete, discovery_mode, shadow_trust_enabled, created_at
        FROM users WHERE user_id = $1`,
       [req.user!.sub]
@@ -58,8 +59,11 @@ const updateSchema = z.object({
   discovery_mode: z.enum(['public', 'private']).optional(),
   email: optionalText(120),
   profession: optionalText(60),
+  organisation: optionalText(120),
+  address: optionalText(500),
   bio: optionalText(500),
   business_info: optionalText(1000),
+  language_pref: z.string().min(2).max(10).optional(),
   shadow_trust_enabled: z.boolean().optional(),
 });
 
@@ -86,8 +90,11 @@ usersRouter.patch('/me', requireAuth, async (req: Request, res: Response, next: 
     if (body.discovery_mode !== undefined) setField('discovery_mode', body.discovery_mode);
     if (body.email !== undefined) setField('email', body.email);
     if (body.profession !== undefined) setField('profession', body.profession);
+    if (body.organisation !== undefined) setField('organisation', body.organisation);
+    if (body.address !== undefined) setField('address', body.address);
     if (body.bio !== undefined) setField('bio', body.bio);
     if (body.business_info !== undefined) setField('business_info', body.business_info);
+    if (body.language_pref !== undefined) setField('language_pref', body.language_pref);
     if (body.shadow_trust_enabled !== undefined) setField('shadow_trust_enabled', body.shadow_trust_enabled);
 
     if (updates.length === 0) throw new AppError(400, 'NO_CHANGES', 'Nothing to update.');
@@ -97,7 +104,7 @@ usersRouter.patch('/me', requireAuth, async (req: Request, res: Response, next: 
     const [user] = await query<UserRow>(
       `UPDATE users SET ${updates.join(', ')} WHERE user_id = $${i}
        RETURNING user_id, handle, display_name, avatar_url, trust_tier, trust_score,
-                 phone_e164, email, profession, bio, business_info, discovery_mode,
+                 identity_id, account_status, legal_name, phone_e164, email, profession, bio, business_info, discovery_mode,
                  shadow_trust_enabled`,
       params
     );
@@ -236,69 +243,18 @@ usersRouter.get('/search', requireAuth, async (req: Request, res: Response, next
 
 const deleteAccountSchema = z.object({
   confirm_handle: z.string(),
+  forfeit_balance: z.boolean().optional(),
+  reason: z.string().max(200).optional(),
 });
 
 usersRouter.delete('/me', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { confirm_handle } = deleteAccountSchema.parse(req.body);
-
-    // Fetch the user to verify the handle confirmation
-    const user = await queryOne<UserRow>(
-      `SELECT * FROM users WHERE user_id = $1 AND is_active = TRUE`,
-      [req.user!.sub]
-    );
-    if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'Account not found.');
-
-    if (confirm_handle.toLowerCase() !== user.handle.toLowerCase()) {
-      throw new AppError(400, 'HANDLE_MISMATCH', 'The handle you entered does not match your account.');
-    }
-
-    const tombstoneId = `deleted_${user.user_id}`;
-    const anonymousHash = crypto.createHash('sha256').update(tombstoneId).digest('hex');
-
-    await withTransaction(async (client) => {
-      // 1. Anonymise the user row — free the handle, wipe PII
-      await client.query(
-        `UPDATE users SET
-           is_active      = FALSE,
-           handle         = $2,
-           display_name   = 'Deleted Account',
-           phone_e164     = $3,
-           phone_hash     = $4,
-           avatar_url     = NULL,
-           updated_at     = NOW()
-         WHERE user_id = $1`,
-        [user.user_id, tombstoneId, tombstoneId, anonymousHash]
-      );
-
-      // 2. Revoke all refresh tokens so no existing session can be reused
-      await client.query(
-        `UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1`,
-        [user.user_id]
-      );
-
-      // 3. Expire all OTP sessions (belt-and-suspenders)
-      await client.query(
-        `UPDATE otp_sessions SET verified = TRUE
-         WHERE phone_e164 = $1 AND verified = FALSE`,
-        [user.phone_e164]
-      );
-
-      // 4. Soft-delete outbound connections; leave inbound so other users'
-      //    contact lists don't silently break (they'll see 'Deleted Account')
-      await client.query(
-        `DELETE FROM connections WHERE owner_id = $1`,
-        [user.user_id]
-      );
-
-      // 5. Revoke all reachability channels
-      await client.query(
-        `UPDATE reachability_channels SET status = 'revoked' WHERE owner_id = $1`,
-        [user.user_id]
-      );
+    const body = deleteAccountSchema.parse(req.body);
+    const data = await selfDeleteAccount(req.user!.sub, body.confirm_handle, {
+      forfeit_balance: body.forfeit_balance,
+      reason: body.reason,
     });
-
-    res.json({ ok: true, data: { deleted: true } });
+    res.json({ ok: true, data });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
     next(err);

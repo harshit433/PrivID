@@ -53,6 +53,7 @@ import { extractFeatures } from '../services/featureStore';
 import { recomputeAndPersist } from '../services/trustScore';
 import { sendAdminNotification } from '../services/fcm';
 import { logger } from '../utils/logger';
+import { slugifyVerifiedHandle, ensureUniqueVerifiedHandle } from '../utils/businessHandle';
 
 export const adminRouter = Router();
 adminRouter.use(requireAdmin);
@@ -499,10 +500,11 @@ adminRouter.post('/review/:id/resolve', async (req: Request, res: Response, next
 
     const user = await queryOne<{
       user_id: string; handle: string; display_name: string | null;
+      identity_id: string | null;
       trust_score: number; trust_tier: string; fcm_token: string | null;
       is_under_review: boolean; is_active: boolean; warning_count: number;
     }>(
-      `SELECT user_id, handle, display_name, trust_score, trust_tier,
+      `SELECT user_id, handle, display_name, identity_id, trust_score, trust_tier,
               fcm_token, is_under_review, is_active, warning_count
          FROM users WHERE user_id = $1`,
       [id],
@@ -521,6 +523,9 @@ adminRouter.post('/review/:id/resolve', async (req: Request, res: Response, next
           await client.query(
             `UPDATE users
                 SET is_under_review   = FALSE,
+                    account_status    = 'active',
+                    account_status_reason = NULL,
+                    account_status_updated_at = NOW(),
                     review_reason     = NULL,
                     review_started_at = NULL
               WHERE user_id = $1`,
@@ -549,6 +554,9 @@ adminRouter.post('/review/:id/resolve', async (req: Request, res: Response, next
           await client.query(
             `UPDATE users
                 SET is_under_review   = FALSE,
+                    account_status    = 'active',
+                    account_status_reason = NULL,
+                    account_status_updated_at = NOW(),
                     review_reason     = NULL,
                     review_started_at = NULL,
                     warning_count     = warning_count + 1
@@ -581,11 +589,14 @@ adminRouter.post('/review/:id/resolve', async (req: Request, res: Response, next
           await client.query(
             `UPDATE users
                 SET is_under_review        = FALSE,
+                    account_status         = 'restricted',
+                    account_status_reason  = $3,
+                    account_status_updated_at = NOW(),
                     review_reason          = NULL,
                     review_started_at      = NULL,
                     call_restriction_until = $2
               WHERE user_id = $1`,
-            [id, restrictUntil],
+            [id, restrictUntil, body.note ?? `Restricted for ${days} days`],
           );
           // -15 score penalty for restriction
           await client.query(
@@ -611,6 +622,9 @@ adminRouter.post('/review/:id/resolve', async (req: Request, res: Response, next
           await client.query(
             `UPDATE users
                 SET is_under_review   = FALSE,
+                    account_status    = 'active',
+                    account_status_reason = NULL,
+                    account_status_updated_at = NOW(),
                     review_reason     = NULL,
                     review_started_at = NULL,
                     is_monitored      = TRUE
@@ -627,12 +641,26 @@ adminRouter.post('/review/:id/resolve', async (req: Request, res: Response, next
           await client.query(
             `UPDATE users
                 SET is_active         = FALSE,
+                    account_status    = 'suspended',
+                    account_status_reason = $2,
+                    account_status_updated_at = NOW(),
                     is_under_review   = FALSE,
                     review_reason     = $2,
                     review_started_at = NULL
               WHERE user_id = $1`,
             [id, body.note ? `Suspended: ${body.note}` : 'Account suspended.'],
           );
+          if (user.identity_id) {
+            await client.query(
+              `UPDATE identities
+                  SET status = 'suspended',
+                      suspended_at = NOW(),
+                      status_reason = $2,
+                      updated_at = NOW()
+                WHERE identity_id = $1`,
+              [user.identity_id, body.note ? `Suspended: ${body.note}` : 'Account suspended.'],
+            );
+          }
           await client.query(
             `INSERT INTO behavior_events (user_id, event_type, metadata)
              VALUES ($1, 'account_suspended', $2)`,
@@ -704,6 +732,9 @@ adminRouter.post('/review/bulk-resolve', async (req: Request, res: Response, nex
         await client.query(
           `UPDATE users
               SET is_under_review   = FALSE,
+                  account_status    = 'active',
+                  account_status_reason = NULL,
+                  account_status_updated_at = NOW(),
                   review_reason     = NULL,
                   review_started_at = NULL
             WHERE user_id = ANY($1) AND is_under_review = TRUE AND is_active = TRUE`,
@@ -714,6 +745,9 @@ adminRouter.post('/review/bulk-resolve', async (req: Request, res: Response, nex
         await client.query(
           `UPDATE users
               SET is_under_review   = FALSE,
+                  account_status    = 'active',
+                  account_status_reason = NULL,
+                  account_status_updated_at = NOW(),
                   review_reason     = NULL,
                   review_started_at = NULL,
                   warning_count     = warning_count + 1
@@ -1076,8 +1110,8 @@ const approveBusinessSchema = z.object({
 adminRouter.post('/businesses/:id/approve', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = approveBusinessSchema.parse(req.body ?? {});
-    const biz = await queryOne<{ business_id: string; status: string }>(
-      `SELECT business_id, status::text AS status FROM businesses WHERE business_id = $1`,
+    const biz = await queryOne<{ business_id: string; status: string; name: string }>(
+      `SELECT business_id, status::text AS status, name FROM businesses WHERE business_id = $1`,
       [req.params.id],
     );
     if (!biz) throw new AppError(404, 'NOT_FOUND', 'Business not found.');
@@ -1087,15 +1121,16 @@ adminRouter.post('/businesses/:id/approve', async (req: Request, res: Response, 
 
     const { rawKey, keyHash } = generateApiKey();
     const plan = body.plan ?? 'starter';
+    const verifiedHandle = await ensureUniqueVerifiedHandle(slugifyVerifiedHandle(biz.name));
 
     await withTransaction(async (client) => {
       const updated = await client.query(
         `UPDATE businesses
          SET status = 'verified', api_key_hash = $1, plan = $2::business_plan,
-             verified_at = NOW(), rejection_reason = NULL, updated_at = NOW()
+             verified_handle = $4, verified_at = NOW(), rejection_reason = NULL, updated_at = NOW()
          WHERE business_id = $3 AND status = 'pending'
          RETURNING business_id`,
-        [keyHash, plan, req.params.id],
+        [keyHash, plan, req.params.id, verifiedHandle],
       );
       if (!updated.rows[0]) {
         throw new AppError(409, 'NOT_PENDING', 'Only pending businesses can be approved.');
@@ -1118,6 +1153,7 @@ adminRouter.post('/businesses/:id/approve', async (req: Request, res: Response, 
       data: {
         business_id: req.params.id,
         status: 'verified',
+        verified_handle: verifiedHandle,
         api_key: rawKey,
         message: 'Store this API key securely — it will not be shown again.',
       },
@@ -1517,6 +1553,85 @@ adminRouter.patch('/referrals/withdrawals/:id', async (req: Request, res: Respon
     if (err instanceof z.ZodError) {
       return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0]!.message));
     }
+    next(err);
+  }
+});
+
+// ─── GET /admin/appeals — appeal queue ───────────────────────────────────────
+
+adminRouter.get('/appeals', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const status = (req.query.status as string) || 'submitted';
+    const rows = await query(
+      `SELECT a.appeal_id, a.user_id, a.identity_id, a.status::text AS status,
+              a.reason, a.evidence, a.resolution, a.reviewer_message,
+              a.created_at, a.resolved_at,
+              u.handle, u.display_name, u.account_status::text AS account_status
+         FROM account_appeals a
+         LEFT JOIN users u ON u.user_id = a.user_id
+        WHERE a.status = $1::appeal_status
+        ORDER BY a.created_at ASC
+        LIMIT 100`,
+      [status],
+    );
+    res.json({ ok: true, data: rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const resolveAppealSchema = z.object({
+  outcome: z.enum(['restored', 'upheld', 'rejected']),
+  reviewer_message: z.string().min(10).max(2000),
+  restore_status: z.enum(['active', 'under_review', 'restricted']).optional(),
+});
+
+adminRouter.post('/appeals/:id/resolve', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = resolveAppealSchema.parse(req.body);
+    const appeal = await queryOne<{
+      appeal_id: string;
+      user_id: string | null;
+      status: string;
+    }>(
+      `SELECT appeal_id, user_id, status::text AS status FROM account_appeals WHERE appeal_id = $1`,
+      [req.params.id],
+    );
+    if (!appeal) throw new AppError(404, 'NOT_FOUND', 'Appeal not found.');
+    if (!['submitted', 'in_review'].includes(appeal.status)) {
+      throw new AppError(409, 'ALREADY_RESOLVED', 'Appeal already resolved.');
+    }
+
+    await query(
+      `UPDATE account_appeals
+          SET status = $2::appeal_status,
+              resolution = $3,
+              reviewer_message = $4,
+              resolved_at = NOW(),
+              updated_at = NOW()
+        WHERE appeal_id = $1`,
+      [req.params.id, body.outcome, body.outcome, body.reviewer_message],
+    );
+
+    if (body.outcome === 'restored' && appeal.user_id && body.restore_status) {
+      const { setUserAccountStatus } = await import('../services/accountState');
+      const pool = (await import('@trustroute/shared')).getPool();
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await setUserAccountStatus(client, appeal.user_id, body.restore_status, 'Appeal restored');
+        await client.query('COMMIT');
+      } catch (e) {
+        await client.query('ROLLBACK');
+        throw e;
+      } finally {
+        client.release();
+      }
+    }
+
+    res.json({ ok: true, data: { appeal_id: appeal.appeal_id, status: body.outcome } });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
     next(err);
   }
 });

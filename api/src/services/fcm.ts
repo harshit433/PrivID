@@ -10,7 +10,9 @@
  */
 
 import admin from 'firebase-admin';
+import { queryOne } from '@trustroute/shared';
 import { logger } from '../utils/logger';
+import { shouldSendNotification } from './notificationPrefs';
 
 // ── Singleton init ────────────────────────────────────────────────────────────
 
@@ -497,6 +499,9 @@ export async function sendAdminNotification(
       },
       data: {
         type: `account_${type}`,
+        deep_link: type === 'restriction' || type === 'suspension' || type === 'review_cleared'
+          ? 'trust'
+          : 'settings',
       },
       android: {
         priority: 'high',
@@ -509,5 +514,102 @@ export async function sendAdminNotification(
     logger.debug('FCM', `Admin notification sent: ${type}`);
   } catch (err: any) {
     logger.warn('FCM', `Admin notification push failed: ${err?.message}`);
+  }
+}
+
+export async function sendChatMessagePush(
+  recipientUserId: string,
+  convId: string,
+  senderId: string,
+  preview: string,
+): Promise<void> {
+  const app = getApp();
+  if (!app) return;
+
+  if (!(await shouldSendNotification(recipientUserId, 'messages'))) return;
+
+  const muted = await queryOne<{ muted_until: Date | null }>(
+    `SELECT muted_until FROM conversation_members WHERE conv_id = $1 AND user_id = $2`,
+    [convId, recipientUserId],
+  );
+  if (muted?.muted_until && new Date(muted.muted_until) > new Date()) return;
+
+  const [tokenRow, sender] = await Promise.all([
+    queryOne<{ fcm_token: string | null }>(`SELECT fcm_token FROM users WHERE user_id = $1`, [recipientUserId]),
+    queryOne<{ display_name: string | null; handle: string }>(
+      `SELECT display_name, handle FROM users WHERE user_id = $1`,
+      [senderId],
+    ),
+  ]);
+  if (!tokenRow?.fcm_token) return;
+
+  const name = sender?.display_name ?? sender?.handle ?? 'Someone';
+  try {
+    await app.messaging().send({
+      token: tokenRow.fcm_token,
+      notification: {
+        title: name,
+        body: preview.slice(0, 180),
+      },
+      data: {
+        type: 'chat_message',
+        conv_id: convId,
+        sender_id: senderId,
+        handle: sender?.handle ?? '',
+        sender_name: name,
+      },
+      android: {
+        priority: 'high',
+        notification: { channelId: 'messages', tag: convId },
+      },
+      apns: {
+        payload: { aps: { sound: 'default', threadId: convId } },
+      },
+    });
+  } catch (err: any) {
+    logger.warn('FCM', `Chat message push failed: ${err?.message}`);
+  }
+}
+
+export async function sendGroupCallPush(
+  recipientUserId: string,
+  convId: string,
+  callerId: string,
+  mode: 'voice' | 'video',
+): Promise<void> {
+  const app = getApp();
+  if (!app) return;
+
+  const [tokenRow, caller, conv] = await Promise.all([
+    queryOne<{ fcm_token: string | null }>(`SELECT fcm_token FROM users WHERE user_id = $1`, [recipientUserId]),
+    queryOne<{ display_name: string | null; handle: string }>(
+      `SELECT display_name, handle FROM users WHERE user_id = $1`,
+      [callerId],
+    ),
+    queryOne<{ title: string | null }>(`SELECT title FROM conversations WHERE conv_id = $1`, [convId]),
+  ]);
+  if (!tokenRow?.fcm_token) return;
+
+  const name = caller?.display_name ?? caller?.handle ?? 'Someone';
+  const group = conv?.title ?? 'Group';
+  try {
+    await app.messaging().send({
+      token: tokenRow.fcm_token,
+      notification: {
+        title: group,
+        body: `${name} started a group ${mode} call`,
+      },
+      data: {
+        type: 'group_call',
+        conv_id: convId,
+        caller_id: callerId,
+        mode,
+        title: group,
+      },
+      android: { priority: 'high', notification: { channelId: 'calls' } },
+      apns: { payload: { aps: { sound: 'default' } } },
+    });
+  } catch (err: any) {
+    logger.warn('FCM', `Group call push failed: ${err?.message}`);
   }
 }

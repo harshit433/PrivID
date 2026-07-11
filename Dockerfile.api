@@ -1,31 +1,11 @@
-# TrustRoute API + 3DiVi Face SDK (Linux)
-# Mount licensed SDK at /opt/threedivi-sdk (see threedivi-sdk/README.md).
-# Apple Silicon: use arm64 Linux SDK + platform linux/arm64 (default in compose).
-# x86-64 SDK only: set DOCKER_PLATFORM=linux/amd64 in .env
+# TrustRoute API (Linux)
 
 FROM node:20-bookworm-slim
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ca-certificates \
-    git \
-    libgomp1 \
-    libstdc++6 \
-    python3 \
-    python3-pip \
-    libgl1 \
-    libglib2.0-0 \
   && rm -rf /var/lib/apt/lists/*
-
-# 3DiVi Node.js bindings (open source; native SDK + license mounted at runtime)
-RUN git clone --depth 1 https://github.com/3DiVi/face-sdk.git /tmp/face-sdk \
-  && mv /tmp/face-sdk/node_js_api /opt/threedivi-node-api \
-  && rm -rf /tmp/face-sdk
-
-ENV THREEDIVI_NODE_API_PATH=/opt/threedivi-node-api \
-    THREEDIVI_SDK_PATH=/opt/threedivi-sdk \
-    THREEDIVI_LIVENESS_MODIFICATION=2d_light \
-    THREEDIVI_LIVENESS_MIN_CONFIDENCE=0.5
 
 WORKDIR /app
 

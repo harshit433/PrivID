@@ -23,6 +23,9 @@ export const mlFeedbackQueue        = new Queue('ml-feedback',       { connectio
 export const statusExpiryQueue      = new Queue('status-expiry',     { connection: getBullRedis() });
 export const businessMessageDeliverQueue = new Queue('business-message-deliver', { connection: getBullRedis() });
 export const ringTimeoutQueue            = new Queue('ring-timeout',             { connection: getBullRedis() });
+export const referralQualificationQueue = new Queue('referral-qualification', { connection: getBullRedis() });
+export const handlePropagationQueue    = new Queue('handle-propagation',    { connection: getBullRedis() });
+export const dataExportQueue             = new Queue('data-export',             { connection: getBullRedis() });
 
 // ─── Job data interfaces ──────────────────────────────────────────────────────
 
@@ -65,4 +68,18 @@ export interface BusinessMessageDeliverJob {
 
 export interface RingTimeoutJob {
   call_id: string;
+}
+
+export interface ReferralQualificationJob {
+  // No payload — scans all in-progress referrals
+}
+
+export interface HandlePropagationJob {
+  job_id: string;
+  user_id: string;
+}
+
+export interface DataExportJob {
+  request_id: string;
+  user_id: string;
 }

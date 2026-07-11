@@ -66,17 +66,14 @@ async function connectRedis(maxAttempts = 30, delayMs = 2_000) {
 }
 // Key helpers — centralized so nothing is spelled inconsistently
 exports.keys = {
-    otpSession: (sessionId) => `otp:session:${sessionId}`,
     refreshToken: (tokenHash) => `refresh:${tokenHash}`,
-    rateLimitOtp: (phone) => `ratelimit:otp:${phone}`,
     rateLimitCall: (userId, targetId) => `ratelimit:call:${userId}:${targetId}`,
     reachabilityToken: (token) => `reach:token:${token}`,
     userSession: (userId) => `user:session:${userId}`,
-    /** Pending MSG91 signup after OTP verified (handle not chosen yet). TTL ~15 min. */
-    msg91SignupPending: (signupToken) => `msg91:signup:${signupToken}`,
-    /** SIM SMS binding challenge for authenticated user. TTL 2 min. */
-    simSmsChallenge: (userId) => `sim_sms:${userId}`,
-    /** SIM SMS send counter — per user, only incremented after successful delivery. TTL 15 min. */
-    rateLimitSimSms: (userId) => `ratelimit:sim_sms:${userId}`,
+    presence: (userId) => `presence:${userId}`,
+    trustScore: (userId) => `trust_score:${userId}`,
     shadowCaller: (phoneHash) => `shadow:caller:${phoneHash}`,
+    mlFeedbackSent: (userId) => `ml:feedback:${userId}`,
+    bizQr: (token) => `biz_qr:${token}`,
+    bizApiRate: (businessId) => `ratelimit:biz_api:${businessId}`,
 };

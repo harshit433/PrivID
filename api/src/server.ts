@@ -1,11 +1,14 @@
 import 'dotenv/config';
 import express from 'express';
+import http from 'http';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 
 import { authRouter } from './routes/auth';
+import { onboardingRouter } from './routes/onboarding';
 import { usersRouter } from './routes/users';
+import { meRouter } from './routes/me';
 import { connectionsRouter } from './routes/connections';
 import { callsRouter } from './routes/calls';
 import { channelsRouter } from './routes/channels';
@@ -21,6 +24,20 @@ import { businessRegisterRouter } from './routes/businessRegister';
 import { adminRouter } from './routes/admin';
 import { activitiesRouter } from './routes/activities';
 import { referralsRouter } from './routes/referrals';
+import { reportsRouter } from './routes/reports';
+import { payoutMethodsRouter } from './routes/payoutMethods';
+import { payoutsRouter } from './routes/payouts';
+import { configRouter } from './routes/config';
+import { walletRouter } from './routes/wallet';
+import { maskedRouter } from './routes/masked';
+import { chatsRouter } from './routes/chats';
+import { mediaRouter } from './routes/media';
+import {
+  paymentsRouter,
+  telephonyRouter,
+  privacySubscriptionRouter,
+  publicReportRouter,
+} from './routes/payments';
 import {
   mountBusinessSuite,
   routeByApiKey,
@@ -28,16 +45,11 @@ import {
   businessSubscriptionsRouter,
 } from './mountBusinessSuite';
 import { errorHandler } from './middleware/errorHandler';
+import { requestIdMiddleware } from './middleware/requestId';
 import { apiLimiter, publicLimiter } from './middleware/rateLimit';
 import { getPool, connectRedis, getRedis } from '@trustroute/shared';
-import { isThreediviConfigured } from './services/threedivi';
 import { isStreamConfigured } from './services/stream';
 import { isLivenessConfigured } from './services/liveness';
-import {
-  isPlayIntegrityConfigured,
-  isPlayIntegrityStrict,
-  isPlayIntegritySideloadAllowed,
-} from './services/playIntegrity';
 import { logger } from './utils/logger';
 
 const app = express();
@@ -47,7 +59,7 @@ const JSON_LIMIT_LARGE = process.env.EXPRESS_JSON_LARGE_LIMIT ?? '15mb';
 
 function pathNeedsLargeJsonBody(path: string): boolean {
   return (
-    path === '/trust/verify/liveness/complete' ||
+    path === '/onboarding/liveness/complete' ||
     path === '/users/me/avatar' ||
     path.startsWith('/status')
   );
@@ -92,6 +104,7 @@ app.use((req, res, next) => {
   })(req, res, next);
 });
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+app.use(requestIdMiddleware);
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 app.get('/favicon.ico', (_req, res) => res.status(204).end());
@@ -110,13 +123,8 @@ app.get('/health', async (_req, res) => {
       service: 'api',
       ts: new Date().toISOString(),
       redis_ok,
-      threedivi_configured: isThreediviConfigured(),
-      threedivi_runner: process.env.THREEDIVI_RUNNER ?? 'auto',
       stream_chat_configured: isStreamConfigured(),
       liveness_configured: isLivenessConfigured(),
-      play_integrity_configured: isPlayIntegrityConfigured(),
-      play_integrity_strict: isPlayIntegrityStrict(),
-      play_integrity_allow_sideload: isPlayIntegritySideloadAllowed(),
     });
   } catch (err) {
     res.status(503).json({ ok: false, error: 'DB unavailable' });
@@ -176,7 +184,9 @@ app.get('/debug/call-health', async (_req, res) => {
 // ─── Routes ───────────────────────────────────────────────────────────────────
 app.use('/register', publicLimiter, businessRegisterRouter);
 app.use('/auth', publicLimiter, authRouter);
+app.use('/onboarding', publicLimiter, onboardingRouter);
 app.use('/users', apiLimiter, usersRouter);
+app.use('/me', apiLimiter, meRouter);
 app.use('/connections', apiLimiter, connectionsRouter);
 app.use('/status', apiLimiter, statusRouter);
 app.use(
@@ -187,6 +197,18 @@ app.use(
 app.use('/calls', apiLimiter, callsRouter);
 app.use('/activities', apiLimiter, activitiesRouter);
 app.use('/referrals', apiLimiter, referralsRouter);
+app.use('/reports', apiLimiter, reportsRouter);
+app.use('/payout-methods', apiLimiter, payoutMethodsRouter);
+app.use('/payouts', apiLimiter, payoutsRouter);
+app.use('/config', publicLimiter, configRouter);
+app.use('/wallet', apiLimiter, walletRouter);
+app.use('/masked', apiLimiter, maskedRouter);
+app.use('/chats', apiLimiter, chatsRouter);
+app.use('/media', apiLimiter, mediaRouter);
+app.use('/subscription', apiLimiter, privacySubscriptionRouter);
+app.use('/payments', publicLimiter, paymentsRouter);
+app.use('/telephony', publicLimiter, telephonyRouter);
+app.use('/r', publicLimiter, publicReportRouter);
 app.use('/channels', apiLimiter, routeByApiKey(businessChannelsRouter, channelsRouter));
 // Stream calls /chat/webhook server-to-server (no user) — exempt it from the
 // per-user limiter; all other /chat routes are authenticated + rate limited.
@@ -218,11 +240,15 @@ async function startServer(): Promise<void> {
   try {
     await connectRedis();
   } catch (err) {
-    console.warn('[API] Starting without Redis — rate limits and SIM SMS may fail until Redis is up:', err);
+    console.warn('[API] Starting without Redis — rate limits and short-lived security state may fail until Redis is up:', err);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    logger.debug('API', `Running on http://0.0.0.0:${PORT}`);
+  const httpServer = http.createServer(app);
+  const { attachChatWebSocket } = await import('./services/chatWsGateway');
+  attachChatWebSocket(httpServer);
+
+  httpServer.listen(PORT, '0.0.0.0', () => {
+    logger.debug('API', `Running on http://0.0.0.0:${PORT} (WS /ws/chat)`);
   });
 }
 

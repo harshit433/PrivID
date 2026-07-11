@@ -1,5 +1,4 @@
-# API + 3DiVi: docker compose up -d --build
-# Place Linux SDK in ./threedivi-sdk/ (see threedivi-sdk/README.md)
+# API: docker compose up -d --build
 
 services:
   api:
@@ -19,13 +18,9 @@ services:
       REDIS_URL: redis://redis:6379
       JWT_PRIVATE_KEY_PATH: /app/api/keys/private.pem
       JWT_PUBLIC_KEY_PATH: /app/api/keys/public.pem
-      THREEDIVI_SDK_PATH: /opt/threedivi-sdk
-      THREEDIVI_NODE_API_PATH: /opt/threedivi-sdk/node_js_api
-      THREEDIVI_RUNNER: python
       API_BASE_URL: http://localhost:3000
       EXPRESS_JSON_LIMIT: 15mb
     volumes:
-      - ./threedivi-sdk:/opt/threedivi-sdk:ro
       - ./api/keys:/app/api/keys:ro
     depends_on:
       postgres:

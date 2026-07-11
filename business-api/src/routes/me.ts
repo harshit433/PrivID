@@ -12,7 +12,8 @@ meRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
     const biz = req.business!;
     const row = await queryOne(
       `SELECT business_id, name, gstin, cin, category, contact_email, website, logo_url,
-              status::text AS status, plan::text AS plan, verified_at, created_at
+              status::text AS status, plan::text AS plan, verified_at, verified_handle,
+              entity_kyc_ref, rejection_reason, created_at
        FROM businesses WHERE business_id = $1`,
       [biz.business_id],
     );

@@ -7,7 +7,7 @@ export const livenessRouter = Router();
 // Lightweight selfie-capture page loaded inside react-native-webview during
 // onboarding. It opens the front camera, guides the user to centre their face,
 // auto-captures a single frame (no buttons), and posts the JPEG back to the
-// React Native host. The host uploads it to /trust/verify/liveness/complete,
+// React Native host. The host uploads it to /onboarding/liveness/complete,
 // which runs passive liveness via the managed provider. No on-device model, no
 // streaming, no CDN — the page is tiny and loads instantly.
 livenessRouter.get('/web', (_req: Request, res: Response) => {

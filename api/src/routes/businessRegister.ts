@@ -65,8 +65,9 @@ businessRegisterRouter.get('/status/:businessId', async (req: Request, res: Resp
       rejection_reason: string | null;
       verified_at: Date | null;
       name: string;
+      verified_handle: string | null;
     }>(
-      `SELECT business_id, status::text AS status, rejection_reason, verified_at, name
+      `SELECT business_id, status::text AS status, rejection_reason, verified_at, name, verified_handle
        FROM businesses WHERE business_id = $1`,
       [businessId],
     );
@@ -75,6 +76,44 @@ businessRegisterRouter.get('/status/:businessId', async (req: Request, res: Resp
   } catch (err) {
     if (err instanceof z.ZodError) {
       return next(new AppError(400, 'VALIDATION_ERROR', 'Invalid business id.'));
+    }
+    next(err);
+  }
+});
+
+const entityKycSchema = z.object({
+  entity_kyc_ref: z.string().min(4).max(120),
+  document_type: z.enum(['cin', 'incorporation', 'partnership', 'other']).optional(),
+});
+
+businessRegisterRouter.post('/entity-kyc/:businessId', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const businessId = uuidSchema.parse(req.params.businessId);
+    const body = entityKycSchema.parse(req.body);
+    const biz = await queryOne<{ business_id: string; status: string }>(
+      `SELECT business_id, status::text AS status FROM businesses WHERE business_id = $1`,
+      [businessId],
+    );
+    if (!biz) throw new AppError(404, 'NOT_FOUND', 'Registration not found.');
+    if (biz.status !== 'pending') {
+      throw new AppError(409, 'NOT_PENDING', 'Entity KYC can only be submitted while registration is pending.');
+    }
+
+    const ref = body.document_type
+      ? `${body.document_type}:${body.entity_kyc_ref.trim()}`
+      : body.entity_kyc_ref.trim();
+
+    const [row] = await query(
+      `UPDATE businesses SET entity_kyc_ref = $1, updated_at = NOW()
+       WHERE business_id = $2
+       RETURNING business_id, entity_kyc_ref`,
+      [ref, businessId],
+    );
+
+    res.json({ ok: true, data: row });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
     }
     next(err);
   }

@@ -26,6 +26,7 @@ import {
   deleteGroupChannel,
   deleteMessageAsAdmin,
 } from '../services/stream';
+import { ensureNativeGroupConversation } from '../services/nativeChat';
 
 export const chatRouter = Router();
 
@@ -342,7 +343,6 @@ chatRouter.post('/groups', requireAuth, async (req: Request, res: Response, next
       );
     });
 
-    // 2. Create Stream channel after DB committed (Stream is not transactional)
     try {
       await createGroupChannel(channelId, name, creatorId, member_ids, avatar_url);
     } catch (streamErr) {
@@ -354,6 +354,12 @@ chatRouter.post('/groups', requireAuth, async (req: Request, res: Response, next
       // Compensate: remove the DB rows since Stream channel doesn't exist
       await query(`DELETE FROM group_channels WHERE group_id = $1`, [groupId]).catch(() => {});
       throw new AppError(503, 'STREAM_ERROR', 'Failed to create group chat. Please try again.');
+    }
+
+    try {
+      await ensureNativeGroupConversation(groupId, name, creatorId, allMemberIds, channelCid, avatar_url);
+    } catch (nativeErr) {
+      logger.warn('nativeChat', 'Native group conversation sync failed: ' + String(nativeErr));
     }
 
     res.status(201).json({

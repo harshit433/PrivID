@@ -1,13 +1,21 @@
 import crypto from 'crypto';
 import { query, queryOne, withTransaction } from '@trustroute/shared';
 import { AppError } from '../middleware/errorHandler';
-
-export const REFERRER_BONUS_PAISE = 3_000;
-export const REFEREE_BONUS_PAISE = 2_000;
-export const MIN_COUNTED_CALL_SECONDS = 10;
-export const WEEKLY_CALL_REQUIREMENT_SECONDS = 4_200; // 70 minutes
-export const INSTALL_DAYS_REQUIRED = 30;
-export const MIN_WITHDRAWAL_PAISE = 10_000; // ₹100
+import {
+  getReferralRewardPaise,
+  getReferralMinWithdrawalPaise,
+  getInviteBaseUrl,
+  getReferralMinCalls,
+  getReferralActiveDays,
+} from './referralConfig';
+import {
+  maskInviteeName,
+  statusHint,
+  statusLabel,
+  type ReferralMilestones,
+  type ReferralStatus,
+} from './referralQualification';
+import { logReferralAudit } from './referralAudit';
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -26,9 +34,7 @@ function normalizeCode(raw: string): string {
 
 async function ensureWallet(userId: string): Promise<void> {
   await query(
-    `INSERT INTO referral_wallets (user_id)
-     VALUES ($1)
-     ON CONFLICT (user_id) DO NOTHING`,
+    `INSERT INTO referral_wallets (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`,
     [userId],
   );
 }
@@ -43,138 +49,15 @@ export async function ensureReferralCode(userId: string): Promise<string> {
   for (let attempt = 0; attempt < 8; attempt++) {
     const code = generateReferralCode();
     try {
-      await query(
-        `INSERT INTO referral_codes (user_id, code) VALUES ($1, $2)`,
-        [userId, code],
-      );
+      await query(`INSERT INTO referral_codes (user_id, code) VALUES ($1, $2)`, [userId, code]);
       await ensureWallet(userId);
       return code;
     } catch (err: unknown) {
-      const pgCode = (err as { code?: string }).code;
-      if (pgCode === '23505') continue; // unique violation
+      if ((err as { code?: string }).code === '23505') continue;
       throw err;
     }
   }
   throw new AppError(500, 'REFERRAL_CODE_FAILED', 'Could not generate referral code.');
-}
-
-async function getDeviceInstallAt(userId: string): Promise<Date | null> {
-  const row = await queryOne<{ install_at: Date }>(
-    `SELECT MIN(created_at) AS install_at
-     FROM device_registrations
-     WHERE user_id = $1`,
-    [userId],
-  );
-  return row?.install_at ?? null;
-}
-
-async function getWeeklyCallSeconds(userId: string): Promise<number> {
-  const row = await queryOne<{ total: string }>(
-    `SELECT COALESCE(SUM(duration_seconds), 0)::text AS total
-     FROM calls
-     WHERE (caller_id = $1 OR callee_id = $1)
-       AND status = 'ended'
-       AND duration_seconds IS NOT NULL
-       AND duration_seconds >= $2
-       AND ended_at > NOW() - INTERVAL '7 days'`,
-    [userId, MIN_COUNTED_CALL_SECONDS],
-  );
-  return parseInt(row?.total ?? '0', 10);
-}
-
-export interface ReferralEligibility {
-  device_install_at: string | null;
-  days_installed: number;
-  days_required: number;
-  weekly_call_seconds: number;
-  weekly_call_required_seconds: number;
-  weekly_call_minutes: number;
-  weekly_call_required_minutes: number;
-  device_requirement_met: boolean;
-  weekly_call_requirement_met: boolean;
-  withdrawal_unlocked: boolean;
-  can_withdraw: boolean;
-}
-
-async function computeEligibility(userId: string): Promise<ReferralEligibility> {
-  const installAt = await getDeviceInstallAt(userId);
-  const weeklyCallSeconds = await getWeeklyCallSeconds(userId);
-
-  let daysInstalled = 0;
-  if (installAt) {
-    daysInstalled = Math.floor((Date.now() - new Date(installAt).getTime()) / 86_400_000);
-  }
-
-  const wallet = await queryOne<{ withdrawal_unlocked: boolean }>(
-    `SELECT withdrawal_unlocked FROM referral_wallets WHERE user_id = $1`,
-    [userId],
-  );
-
-  const deviceMet = daysInstalled >= INSTALL_DAYS_REQUIRED;
-  const weeklyMet = weeklyCallSeconds >= WEEKLY_CALL_REQUIREMENT_SECONDS;
-  const unlocked = wallet?.withdrawal_unlocked ?? false;
-
-  return {
-    device_install_at: installAt ? new Date(installAt).toISOString() : null,
-    days_installed: daysInstalled,
-    days_required: INSTALL_DAYS_REQUIRED,
-    weekly_call_seconds: weeklyCallSeconds,
-    weekly_call_required_seconds: WEEKLY_CALL_REQUIREMENT_SECONDS,
-    weekly_call_minutes: Math.floor(weeklyCallSeconds / 60),
-    weekly_call_required_minutes: WEEKLY_CALL_REQUIREMENT_SECONDS / 60,
-    device_requirement_met: deviceMet,
-    weekly_call_requirement_met: weeklyMet,
-    withdrawal_unlocked: unlocked,
-    can_withdraw: unlocked && deviceMet && weeklyMet,
-  };
-}
-
-/** Move pending → withdrawable once user first meets both gates. */
-export async function syncWithdrawalEligibility(userId: string): Promise<ReferralEligibility> {
-  await ensureWallet(userId);
-  const eligibility = await computeEligibility(userId);
-
-  if (
-    !eligibility.withdrawal_unlocked
-    && eligibility.device_requirement_met
-    && eligibility.weekly_call_requirement_met
-  ) {
-    await withTransaction(async (client) => {
-      const { rows } = await client.query<{ pending_paise: number }>(
-        `SELECT pending_paise FROM referral_wallets
-         WHERE user_id = $1 FOR UPDATE`,
-        [userId],
-      );
-      const pending = rows[0]?.pending_paise ?? 0;
-      if (pending > 0) {
-        await client.query(
-          `UPDATE referral_wallets
-           SET pending_paise = 0,
-               withdrawable_paise = withdrawable_paise + $2,
-               withdrawal_unlocked = TRUE,
-               updated_at = NOW()
-           WHERE user_id = $1`,
-          [userId, pending],
-        );
-        await client.query(
-          `INSERT INTO referral_ledger (user_id, amount_paise, entry_type, description)
-           VALUES ($1, $2, 'pending_to_withdrawable', 'Withdrawal requirements met — balance unlocked')`,
-          [userId, pending],
-        );
-      } else {
-        await client.query(
-          `UPDATE referral_wallets
-           SET withdrawal_unlocked = TRUE, updated_at = NOW()
-           WHERE user_id = $1`,
-          [userId],
-        );
-      }
-    });
-    eligibility.withdrawal_unlocked = true;
-    eligibility.can_withdraw = true;
-  }
-
-  return eligibility;
 }
 
 export async function validateReferralCode(
@@ -182,75 +65,22 @@ export async function validateReferralCode(
   refereeUserId: string,
 ): Promise<{ valid: true; referrer_handle: string } | { valid: false; reason: string }> {
   const code = normalizeCode(rawCode);
-  if (code.length < 4) {
-    return { valid: false, reason: 'Enter a valid referral code.' };
-  }
+  if (code.length < 4) return { valid: false, reason: 'Enter a valid referral code.' };
 
   const referrer = await queryOne<{ user_id: string; handle: string; onboarding_complete: boolean }>(
     `SELECT u.user_id, u.handle, u.onboarding_complete
-     FROM referral_codes rc
-     JOIN users u ON u.user_id = rc.user_id
+     FROM referral_codes rc JOIN users u ON u.user_id = rc.user_id
      WHERE UPPER(rc.code) = $1 AND u.is_active = TRUE`,
     [code],
   );
+  if (!referrer) return { valid: false, reason: 'Referral code not found.' };
+  if (referrer.user_id === refereeUserId) return { valid: false, reason: 'You cannot use your own referral code.' };
+  if (!referrer.onboarding_complete) return { valid: false, reason: 'This referral code is not active yet.' };
 
-  if (!referrer) {
-    return { valid: false, reason: 'Referral code not found.' };
-  }
-  if (referrer.user_id === refereeUserId) {
-    return { valid: false, reason: 'You cannot use your own referral code.' };
-  }
-  if (!referrer.onboarding_complete) {
-    return { valid: false, reason: 'This referral code is not active yet.' };
-  }
-
-  const alreadyUsed = await queryOne(
-    `SELECT event_id FROM referral_events WHERE referee_user_id = $1`,
-    [refereeUserId],
-  );
-  if (alreadyUsed) {
-    return { valid: false, reason: 'A referral bonus was already applied to this account.' };
-  }
+  const alreadyUsed = await queryOne(`SELECT referral_id FROM referrals WHERE referred_id = $1`, [refereeUserId]);
+  if (alreadyUsed) return { valid: false, reason: 'A referral was already applied to this account.' };
 
   return { valid: true, referrer_handle: referrer.handle };
-}
-
-async function creditWallet(
-  client: import('pg').PoolClient,
-  userId: string,
-  amountPaise: number,
-  entryType: 'referrer_bonus' | 'referee_bonus',
-  referenceId: string,
-  description: string,
-  withdrawalUnlocked: boolean,
-): Promise<void> {
-  if (withdrawalUnlocked) {
-    await client.query(
-      `INSERT INTO referral_wallets (user_id, total_earned_paise, withdrawable_paise)
-       VALUES ($1, $2, $2)
-       ON CONFLICT (user_id) DO UPDATE SET
-         total_earned_paise = referral_wallets.total_earned_paise + EXCLUDED.total_earned_paise,
-         withdrawable_paise = referral_wallets.withdrawable_paise + EXCLUDED.withdrawable_paise,
-         updated_at = NOW()`,
-      [userId, amountPaise],
-    );
-  } else {
-    await client.query(
-      `INSERT INTO referral_wallets (user_id, total_earned_paise, pending_paise)
-       VALUES ($1, $2, $2)
-       ON CONFLICT (user_id) DO UPDATE SET
-         total_earned_paise = referral_wallets.total_earned_paise + EXCLUDED.total_earned_paise,
-         pending_paise = referral_wallets.pending_paise + EXCLUDED.pending_paise,
-         updated_at = NOW()`,
-      [userId, amountPaise],
-    );
-  }
-
-  await client.query(
-    `INSERT INTO referral_ledger (user_id, amount_paise, entry_type, reference_id, description)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [userId, amountPaise, entryType, referenceId, description],
-  );
 }
 
 export async function applyReferralOnOnboardingComplete(
@@ -261,74 +91,46 @@ export async function applyReferralOnOnboardingComplete(
   if (!code) return { applied: false };
 
   const validation = await validateReferralCode(code, refereeUserId);
-  if (!validation.valid) {
-    throw new AppError(400, 'INVALID_REFERRAL_CODE', validation.reason);
-  }
+  if (!validation.valid) throw new AppError(400, 'INVALID_REFERRAL_CODE', validation.reason);
 
   const referrer = await queryOne<{ user_id: string; handle: string }>(
-    `SELECT u.user_id, u.handle
-     FROM referral_codes rc
-     JOIN users u ON u.user_id = rc.user_id
-     WHERE UPPER(rc.code) = $1`,
+    `SELECT u.user_id, u.handle FROM referral_codes rc JOIN users u ON u.user_id = rc.user_id WHERE UPPER(rc.code) = $1`,
     [code],
   );
-  if (!referrer) {
-    throw new AppError(400, 'INVALID_REFERRAL_CODE', 'Referral code not found.');
-  }
+  if (!referrer) throw new AppError(400, 'INVALID_REFERRAL_CODE', 'Referral code not found.');
 
-  const referee = await queryOne<{ handle: string }>(
-    `SELECT handle FROM users WHERE user_id = $1`,
+  const reward = await getReferralRewardPaise();
+  const kycRow = await queryOne<{ kyc_status: string }>(
+    `SELECT kyc_status FROM users WHERE user_id = $1`,
     [refereeUserId],
   );
-  const refereeHandle = referee?.handle ?? 'user';
+  const initialStatus: ReferralStatus = kycRow?.kyc_status === 'verified' ? 'verified' : 'invited';
 
   await withTransaction(async (client) => {
-    const dup = await client.query(
-      `SELECT event_id FROM referral_events WHERE referee_user_id = $1 FOR UPDATE`,
-      [refereeUserId],
-    );
-    if (dup.rows.length > 0) {
-      throw new AppError(409, 'REFERRAL_ALREADY_APPLIED', 'Referral bonus already applied.');
-    }
+    const dup = await client.query(`SELECT referral_id FROM referrals WHERE referred_id = $1 FOR UPDATE`, [refereeUserId]);
+    if (dup.rows.length > 0) throw new AppError(409, 'REFERRAL_ALREADY_APPLIED', 'Referral already applied.');
 
-    const { rows: eventRows } = await client.query<{ event_id: string }>(
-      `INSERT INTO referral_events
-         (referrer_user_id, referee_user_id, referral_code,
-          referrer_bonus_paise, referee_bonus_paise)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING event_id`,
-      [referrer.user_id, refereeUserId, code, REFERRER_BONUS_PAISE, REFEREE_BONUS_PAISE],
+    const { rows } = await client.query<{ referral_id: string }>(
+      `INSERT INTO referrals (referrer_id, referred_id, code, status, reward_paise, milestones)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+       RETURNING referral_id`,
+      [
+        referrer.user_id,
+        refereeUserId,
+        code,
+        initialStatus,
+        reward,
+        JSON.stringify({ kyc: initialStatus === 'verified', calls: 0, active_days: 0 }),
+      ],
     );
-    const eventId = eventRows[0]!.event_id;
-
-    const referrerWallet = await client.query<{ withdrawal_unlocked: boolean }>(
-      `SELECT withdrawal_unlocked FROM referral_wallets WHERE user_id = $1`,
-      [referrer.user_id],
-    );
-    const refereeWallet = await client.query<{ withdrawal_unlocked: boolean }>(
-      `SELECT withdrawal_unlocked FROM referral_wallets WHERE user_id = $1`,
-      [refereeUserId],
-    );
-
-    await creditWallet(
-      client,
-      referrer.user_id,
-      REFERRER_BONUS_PAISE,
-      'referrer_bonus',
-      eventId,
-      `Referral bonus — @${refereeHandle} joined`,
-      referrerWallet.rows[0]?.withdrawal_unlocked ?? false,
-    );
-
-    await creditWallet(
-      client,
-      refereeUserId,
-      REFEREE_BONUS_PAISE,
-      'referee_bonus',
-      eventId,
-      'Welcome bonus — signed up with a referral code',
-      refereeWallet.rows[0]?.withdrawal_unlocked ?? false,
-    );
+    const referralId = rows[0]!.referral_id;
+    await logReferralAudit({
+      referralId,
+      userId: referrer.user_id,
+      action: 'referral_created',
+      toStatus: initialStatus,
+      meta: { referred_id: refereeUserId },
+    });
   });
 
   await ensureReferralCode(referrer.user_id);
@@ -337,140 +139,224 @@ export async function applyReferralOnOnboardingComplete(
   return { applied: true, referrer_handle: referrer.handle };
 }
 
-export interface ReferralLedgerEntry {
-  entry_id: string;
-  amount_paise: number;
-  entry_type: string;
-  description: string | null;
-  created_at: string;
-}
-
-export interface ReferralSummary {
+export interface ReferralHome {
   code: string;
+  invite_link: string;
+  reward_paise: number;
+  reward_rupees: number;
+  min_calls: number;
+  active_days: number;
+  min_withdrawal_paise: number;
   wallet: {
-    total_earned_paise: number;
-    withdrawable_paise: number;
+    available_paise: number;
     pending_paise: number;
-    total_earned_rupees: number;
-    withdrawable_rupees: number;
+    total_earned_paise: number;
+    available_rupees: number;
     pending_rupees: number;
+    total_earned_rupees: number;
   };
-  eligibility: ReferralEligibility;
-  referrals_count: number;
-  ledger: ReferralLedgerEntry[];
+  invites_count: number;
+  qualified_count: number;
+  next_pending_estimate_paise: number;
 }
 
-export async function getReferralSummary(userId: string): Promise<ReferralSummary> {
+export async function getReferralHome(userId: string): Promise<ReferralHome> {
   const code = await ensureReferralCode(userId);
-  const eligibility = await syncWithdrawalEligibility(userId);
+  const [reward, minCalls, activeDays, minWithdraw, baseUrl] = await Promise.all([
+    getReferralRewardPaise(),
+    getReferralMinCalls(),
+    getReferralActiveDays(),
+    getReferralMinWithdrawalPaise(),
+    getInviteBaseUrl(),
+  ]);
 
   const wallet = await queryOne<{
     total_earned_paise: number;
     withdrawable_paise: number;
     pending_paise: number;
-  }>(
-    `SELECT total_earned_paise, withdrawable_paise, pending_paise
-     FROM referral_wallets WHERE user_id = $1`,
-    [userId],
+  }>(`SELECT total_earned_paise, withdrawable_paise, pending_paise FROM referral_wallets WHERE user_id = $1`, [userId]);
+
+  const stats = await queryOne<{ total: string; qualified: string; pending_est: string }>(
+    `SELECT
+       COUNT(*)::text AS total,
+       COUNT(*) FILTER (WHERE status IN ('qualified', 'paid'))::text AS qualified,
+       (COUNT(*) FILTER (WHERE status IN ('invited', 'verified', 'qualifying')) * $2)::text AS pending_est
+     FROM referrals WHERE referrer_id = $1`,
+    [userId, reward],
   );
 
-  const countRow = await queryOne<{ count: string }>(
-    `SELECT COUNT(*)::text AS count FROM referral_events
-     WHERE referrer_user_id = $1 AND status = 'credited'`,
-    [userId],
-  );
-
-  const ledger = await query<ReferralLedgerEntry>(
-    `SELECT entry_id, amount_paise, entry_type, description, created_at
-     FROM referral_ledger
-     WHERE user_id = $1
-     ORDER BY created_at DESC
-     LIMIT 50`,
-    [userId],
-  );
-
-  const total = wallet?.total_earned_paise ?? 0;
-  const withdrawable = wallet?.withdrawable_paise ?? 0;
-  const pending = wallet?.pending_paise ?? 0;
+  const available = wallet?.withdrawable_paise ?? 0;
+  const pendingWallet = wallet?.pending_paise ?? 0;
+  const pendingEst = parseInt(stats?.pending_est ?? '0', 10);
 
   return {
     code,
+    invite_link: `${baseUrl}?code=${code}`,
+    reward_paise: reward,
+    reward_rupees: reward / 100,
+    min_calls: minCalls,
+    active_days: activeDays,
+    min_withdrawal_paise: minWithdraw,
     wallet: {
-      total_earned_paise: total,
-      withdrawable_paise: withdrawable,
-      pending_paise: pending,
-      total_earned_rupees: total / 100,
-      withdrawable_rupees: withdrawable / 100,
-      pending_rupees: pending / 100,
+      available_paise: available,
+      pending_paise: pendingWallet + pendingEst,
+      total_earned_paise: wallet?.total_earned_paise ?? 0,
+      available_rupees: available / 100,
+      pending_rupees: (pendingWallet + pendingEst) / 100,
+      total_earned_rupees: (wallet?.total_earned_paise ?? 0) / 100,
     },
-    eligibility,
-    referrals_count: parseInt(countRow?.count ?? '0', 10),
-    ledger: ledger.map((e) => ({
-      ...e,
-      created_at: new Date(e.created_at).toISOString(),
-    })),
+    invites_count: parseInt(stats?.total ?? '0', 10),
+    qualified_count: parseInt(stats?.qualified ?? '0', 10),
+    next_pending_estimate_paise: pendingEst,
   };
 }
 
-export async function requestWithdrawal(
-  userId: string,
-  amountPaise: number,
-  upiId: string,
-): Promise<{ withdrawal_id: string; status: string }> {
-  if (amountPaise < MIN_WITHDRAWAL_PAISE) {
-    throw new AppError(400, 'MIN_WITHDRAWAL', `Minimum withdrawal is ₹${MIN_WITHDRAWAL_PAISE / 100}.`);
-  }
+export interface ReferralListItem {
+  referral_id: string;
+  display_name: string;
+  handle_masked: string;
+  status: ReferralStatus;
+  status_label: string;
+  status_hint: string;
+  milestones: ReferralMilestones;
+  created_at: string;
+  qualified_at: string | null;
+}
 
-  const eligibility = await syncWithdrawalEligibility(userId);
-  if (!eligibility.withdrawal_unlocked) {
-    throw new AppError(
-      403,
-      'WITHDRAWAL_LOCKED',
-      'Complete 30 days on device and 70 minutes of calls this week to unlock withdrawals.',
-    );
-  }
-  if (!eligibility.device_requirement_met || !eligibility.weekly_call_requirement_met) {
-    throw new AppError(
-      403,
-      'WITHDRAWAL_REQUIREMENTS',
-      'You need 30 days on your device and 70 minutes of calls in the last 7 days to withdraw.',
-    );
-  }
+export async function listMyReferrals(userId: string): Promise<ReferralListItem[]> {
+  const rows = await query<{
+    referral_id: string;
+    status: ReferralStatus;
+    milestones: ReferralMilestones;
+    created_at: Date;
+    qualified_at: Date | null;
+    display_name: string | null;
+    handle: string;
+  }>(
+    `SELECT r.referral_id, r.status, r.milestones, r.created_at, r.qualified_at,
+            u.display_name, u.handle
+     FROM referrals r
+     JOIN users u ON u.user_id = r.referred_id
+     WHERE r.referrer_id = $1
+     ORDER BY r.created_at DESC`,
+    [userId],
+  );
 
-  return withTransaction(async (client) => {
-    const { rows } = await client.query<{
-      withdrawable_paise: number;
-    }>(
-      `SELECT withdrawable_paise FROM referral_wallets
-       WHERE user_id = $1 FOR UPDATE`,
+  return rows.map((r) => {
+    const qualified = r.status === 'qualified' || r.status === 'paid';
+    return {
+      referral_id: r.referral_id,
+      display_name: maskInviteeName(r.display_name, r.handle, qualified),
+      handle_masked: `@${r.handle.slice(0, 2)}***`,
+      status: r.status,
+      status_label: statusLabel(r.status),
+      status_hint: statusHint(r.status),
+      milestones: r.milestones ?? {},
+      created_at: new Date(r.created_at).toISOString(),
+      qualified_at: r.qualified_at ? new Date(r.qualified_at).toISOString() : null,
+    };
+  });
+}
+
+export interface ReferralWalletView {
+  available_paise: number;
+  pending_paise: number;
+  total_earned_paise: number;
+  min_withdrawal_paise: number;
+  ledger: {
+    entry_id: string;
+    amount_paise: number;
+    entry_type: string;
+    description: string | null;
+    created_at: string;
+  }[];
+}
+
+export async function getReferralWallet(userId: string): Promise<ReferralWalletView> {
+  await ensureWallet(userId);
+  const minWithdraw = await getReferralMinWithdrawalPaise();
+  const home = await getReferralHome(userId);
+  const ledger = await query<{
+    entry_id: string;
+    amount_paise: number;
+    entry_type: string;
+    description: string | null;
+    created_at: Date;
+  }>(
+    `SELECT entry_id, amount_paise, entry_type, description, created_at
+     FROM referral_ledger WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100`,
+    [userId],
+  );
+
+  return {
+    available_paise: home.wallet.available_paise,
+    pending_paise: home.wallet.pending_paise,
+    total_earned_paise: home.wallet.total_earned_paise,
+    min_withdrawal_paise: minWithdraw,
+    ledger: ledger.map((e) => ({ ...e, created_at: new Date(e.created_at).toISOString() })),
+  };
+}
+
+export async function convertToCallBalance(userId: string, amountPaise: number): Promise<void> {
+  if (amountPaise <= 0) throw new AppError(400, 'INVALID_AMOUNT', 'Enter a valid amount.');
+
+  await withTransaction(async (client) => {
+    const { rows } = await client.query<{ withdrawable_paise: number }>(
+      `SELECT withdrawable_paise FROM referral_wallets WHERE user_id = $1 FOR UPDATE`,
       [userId],
     );
     const available = rows[0]?.withdrawable_paise ?? 0;
-    if (amountPaise > available) {
-      throw new AppError(400, 'INSUFFICIENT_BALANCE', 'Withdrawal amount exceeds available balance.');
-    }
-
-    const { rows: wRows } = await client.query<{ withdrawal_id: string }>(
-      `INSERT INTO referral_withdrawals (user_id, amount_paise, upi_id)
-       VALUES ($1, $2, $3)
-       RETURNING withdrawal_id`,
-      [userId, amountPaise, upiId.trim()],
-    );
-    const withdrawalId = wRows[0]!.withdrawal_id;
+    if (amountPaise > available) throw new AppError(400, 'INSUFFICIENT_BALANCE', 'Amount exceeds available balance.');
 
     await client.query(
-      `UPDATE referral_wallets
-       SET withdrawable_paise = withdrawable_paise - $2, updated_at = NOW()
-       WHERE user_id = $1`,
+      `UPDATE referral_wallets SET withdrawable_paise = withdrawable_paise - $2, updated_at = NOW() WHERE user_id = $1`,
       [userId, amountPaise],
     );
-
     await client.query(
-      `INSERT INTO referral_ledger (user_id, amount_paise, entry_type, reference_id, description)
-       VALUES ($1, $2, 'withdrawal', $3, $4)`,
-      [userId, -amountPaise, withdrawalId, `Withdrawal request — UPI ${upiId.trim()}`],
+      `INSERT INTO referral_ledger (user_id, amount_paise, entry_type, description)
+       VALUES ($1, $2, 'convert_to_call', 'Moved to call balance')`,
+      [userId, -amountPaise],
     );
-
-    return { withdrawal_id: withdrawalId, status: 'requested' };
+    await client.query(
+      `INSERT INTO wallets (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`,
+      [userId],
+    );
+    await client.query(
+      `UPDATE wallets SET balance_paise = balance_paise + $2, updated_at = NOW() WHERE user_id = $1`,
+      [userId, amountPaise],
+    );
+    await client.query(
+      `INSERT INTO wallet_transactions (user_id, type, amount_paise, status, meta)
+       VALUES ($1, 'referral_credit', $2, 'completed', $3::jsonb)`,
+      [userId, amountPaise, JSON.stringify({ source: 'referral_wallet' })],
+    );
   });
+}
+
+// Legacy summary for backward compat during migration
+export async function getReferralSummary(userId: string) {
+  const home = await getReferralHome(userId);
+  const wallet = await getReferralWallet(userId);
+  return {
+    code: home.code,
+    invite_link: home.invite_link,
+    reward_paise: home.reward_paise,
+    reward_rupees: home.reward_rupees,
+    wallet: {
+      total_earned_paise: home.wallet.total_earned_paise,
+      withdrawable_paise: home.wallet.available_paise,
+      pending_paise: home.wallet.pending_paise,
+      total_earned_rupees: home.wallet.total_earned_rupees,
+      withdrawable_rupees: home.wallet.available_rupees,
+      pending_rupees: home.wallet.pending_rupees,
+    },
+    referrals_count: home.invites_count,
+    qualified_count: home.qualified_count,
+    ledger: wallet.ledger,
+    config: {
+      min_calls: home.min_calls,
+      active_days: home.active_days,
+      min_withdrawal_paise: home.min_withdrawal_paise,
+    },
+  };
 }

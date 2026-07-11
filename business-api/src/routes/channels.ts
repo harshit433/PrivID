@@ -33,7 +33,11 @@ async function assertPlanAllowsChannels(businessId: string, plan: keyof typeof P
   const count = parseInt(row?.n ?? '0', 10);
   const max = PLAN_LIMITS[plan]?.maxChannels ?? PLAN_LIMITS.starter.maxChannels;
   if (count >= max) {
-    throw new AppError(403, 'PLAN_LIMIT', `Channel limit reached for ${plan} plan (${max}).`);
+    throw new AppError(
+      403,
+      'PLAN_LIMIT',
+      `Your ${plan} plan allows ${max} channels. Upgrade to add more.`,
+    );
   }
 }
 

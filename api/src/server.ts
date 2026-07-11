@@ -188,6 +188,7 @@ app.get('/debug/digilocker-egress', async (_req, res) => {
       bodyPreview: body.slice(0, 240),
       stderr: String(stderr || '').slice(0, 200),
       clientIdPrefix: cfg.id.slice(0, 8),
+      egressIp: await fetch('https://api.ipify.org').then((r) => r.text()).catch(() => null),
     });
   } catch (err) {
     res.status(500).json({

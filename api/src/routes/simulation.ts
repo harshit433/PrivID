@@ -20,7 +20,7 @@ import crypto from 'crypto';
 
 export const simulationRouter = Router();
 
-const SIM_KEY = process.env.SIMULATION_KEY ?? 'privid-sim-2024';
+const SIM_KEY = process.env.SIMULATION_KEY ?? (process.env.NODE_ENV === 'production' ? '' : 'privid-sim-2024');
 
 function requireSimKey(req: Request, _res: Response, next: NextFunction) {
   const key = req.body?.sim_key ?? req.query?.sim_key;

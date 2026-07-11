@@ -481,16 +481,24 @@ callsRouter.post('/:id/livekit-token', requireAuth, async (req: Request, res: Re
       throw new AppError(409, 'CALL_ENDED', 'Call is no longer active.');
     }
 
-    const apiKey    = process.env.LIVEKIT_API_KEY    ?? 'devkey';
-    const apiSecret = process.env.LIVEKIT_API_SECRET ?? 'devsecret';
-    const livekitUrl = process.env.LIVEKIT_URL       ?? 'ws://localhost:7880';
+    const apiKey = process.env.LIVEKIT_API_KEY;
+    const apiSecret = process.env.LIVEKIT_API_SECRET;
+    const livekitUrl = process.env.LIVEKIT_URL;
+    if (!apiKey || !apiSecret || !livekitUrl) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new AppError(503, 'CALLS_UNAVAILABLE', 'Calling is briefly unavailable.');
+      }
+    }
+    const resolvedKey = apiKey ?? 'devkey';
+    const resolvedSecret = apiSecret ?? 'devsecret';
+    const resolvedUrl = livekitUrl ?? 'ws://localhost:7880';
 
     const user = await queryOne<{ handle: string; display_name: string }>(
       `SELECT handle, display_name FROM users WHERE user_id = $1`,
       [req.user!.sub],
     );
 
-    const at = new AccessToken(apiKey, apiSecret, {
+    const at = new AccessToken(resolvedKey, resolvedSecret, {
       identity: req.user!.sub,
       name: user?.display_name ?? user?.handle ?? req.user!.sub,
       ttl: '15m',
@@ -504,7 +512,7 @@ callsRouter.post('/:id/livekit-token', requireAuth, async (req: Request, res: Re
     });
 
     const token = await at.toJwt();
-    res.json({ ok: true, data: { token, url: livekitUrl } });
+    res.json({ ok: true, data: { token, url: resolvedUrl } });
   } catch (err) {
     next(err);
   }

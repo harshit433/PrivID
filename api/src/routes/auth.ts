@@ -126,3 +126,60 @@ authRouter.post('/logout', requireAuth, async (req: Request, res: Response, next
     next(err);
   }
 });
+
+/** Revoke every refresh token for this user (all devices). */
+authRouter.post('/logout-all', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await query(`UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1`, [req.user!.sub]);
+    res.json({ ok: true, data: { revoked: true } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const registerDeviceSchema = z.object({
+  platform: z.enum(['ios', 'android']),
+  device_fingerprint: z.string().min(8).max(500).optional(),
+  push_token: z.string().max(500).optional(),
+});
+
+authRouter.post('/device', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = registerDeviceSchema.parse(req.body ?? {});
+    const fp = body.device_fingerprint
+      ? crypto.createHash('sha256').update(body.device_fingerprint).digest('hex')
+      : null;
+    if (fp) {
+      const existing = await queryOne<{ device_id: string }>(
+        `SELECT device_id FROM device_registrations WHERE user_id = $1 AND device_fingerprint = $2`,
+        [req.user!.sub, fp],
+      );
+      if (existing) {
+        await query(
+          `UPDATE device_registrations
+              SET last_seen_at = NOW(),
+                  push_token = COALESCE($2, push_token),
+                  platform = $3
+            WHERE device_id = $1`,
+          [existing.device_id, body.push_token ?? null, body.platform],
+        );
+      } else {
+        await query(
+          `INSERT INTO device_registrations (user_id, platform, device_fingerprint, push_token)
+           VALUES ($1, $2, $3, $4)`,
+          [req.user!.sub, body.platform, fp, body.push_token ?? null],
+        );
+      }
+    } else {
+      await query(
+        `INSERT INTO device_registrations (user_id, platform, push_token)
+         VALUES ($1, $2, $3)`,
+        [req.user!.sub, body.platform, body.push_token ?? null],
+      );
+    }
+    res.json({ ok: true, data: { registered: true } });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});

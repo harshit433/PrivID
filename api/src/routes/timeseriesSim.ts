@@ -20,7 +20,7 @@ import { teardownSim } from '../services/simEngine/teardown';
 
 export const timeseriesRouter = Router();
 
-const SIM_KEY = process.env.SIMULATION_KEY ?? 'privid-sim-2024';
+const SIM_KEY = process.env.SIMULATION_KEY ?? (process.env.NODE_ENV === 'production' ? '' : 'privid-sim-2024');
 
 function keyOk(req: Request): boolean {
   const key = req.body?.sim_key ?? req.query?.sim_key;

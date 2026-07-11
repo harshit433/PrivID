@@ -278,27 +278,32 @@ function normalizeToE164(raw: string): string | null {
 }
 
 const lookupSchema = z.object({
-  phones: z.array(z.string()).min(1).max(500),
+  phones: z.array(z.string()).max(500).optional(),
+  phone_hashes: z.array(z.string().regex(/^[a-f0-9]{64}$/i)).max(500).optional(),
+}).refine((b) => (b.phones?.length ?? 0) > 0 || (b.phone_hashes?.length ?? 0) > 0, {
+  message: 'phones or phone_hashes required',
 });
 
 usersRouter.post('/lookup-by-phones', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { phones } = lookupSchema.parse(req.body);
+    const body = lookupSchema.parse(req.body);
 
-    // Normalise and hash — deduplicate
-    const hashMap = new Map<string, string>(); // hash → e164
-    for (const raw of phones) {
+    // Prefer client-side hashes (privacy). Fall back to server-side hash of raw phones.
+    const hashSet = new Set<string>();
+    for (const h of body.phone_hashes ?? []) {
+      hashSet.add(h.toLowerCase());
+    }
+    for (const raw of body.phones ?? []) {
       const e164 = normalizeToE164(raw);
       if (!e164) continue;
-      const hash = crypto.createHash('sha256').update(e164).digest('hex');
-      hashMap.set(hash, e164);
+      hashSet.add(crypto.createHash('sha256').update(e164).digest('hex'));
     }
 
-    if (hashMap.size === 0) {
+    if (hashSet.size === 0) {
       return res.json({ ok: true, data: [] });
     }
 
-    const hashes = Array.from(hashMap.keys());
+    const hashes = Array.from(hashSet);
     const placeholders = hashes.map((_, i) => `$${i + 2}`).join(', ');
 
     const found = await query<{

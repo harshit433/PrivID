@@ -16,6 +16,7 @@ export type ShareRow = {
   max_uses: number | null;
   uses: number;
   active: boolean;
+  receive_only: boolean;
   created_at: Date;
 };
 
@@ -104,8 +105,8 @@ export async function createDisposableShare(
 
   const token = newToken();
   const [row] = await query<ShareRow>(
-    `INSERT INTO contact_shares (owner_id, token, type, label, expires_at, max_uses)
-     VALUES ($1, $2, 'disposable', $3, $4, $5)
+    `INSERT INTO contact_shares (owner_id, token, type, label, expires_at, max_uses, receive_only)
+     VALUES ($1, $2, 'disposable', $3, $4, $5, TRUE)
      RETURNING *`,
     [
       userId,
@@ -240,6 +241,7 @@ export async function resolveShareToken(
   expires_at: string | null;
   owner_handle: string;
   label: string | null;
+  receive_only: boolean;
 }> {
   const share = await queryOne<ShareRow>(
     `SELECT * FROM contact_shares WHERE token = $1 AND active = TRUE`,
@@ -247,6 +249,16 @@ export async function resolveShareToken(
   );
   if (!share || isExpired(share)) {
     throw new AppError(410, 'SHARE_EXPIRED', 'This code has expired or is not valid.');
+  }
+
+  // Receive-only: only scanners (people who were given the link) may initiate.
+  // The owner cannot "use" their own disposable token to cold-outbound.
+  if (share.receive_only !== false && scannerId && scannerId === share.owner_id) {
+    throw new AppError(
+      403,
+      'SHARE_RECEIVE_ONLY',
+      'This is a receive-only handle. Share it so others can reach you — you cannot use it to contact yourself.',
+    );
   }
 
   const owner = await queryOne<{
@@ -288,6 +300,7 @@ export async function resolveShareToken(
     expires_at: share.expires_at ? new Date(share.expires_at).toISOString() : null,
     owner_handle: owner.handle,
     label: share.label,
+    receive_only: share.receive_only !== false,
   };
 }
 

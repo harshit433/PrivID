@@ -1,10 +1,12 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { query, queryOne } from '@trustroute/shared';
+import { createHash } from 'crypto';
+import { query, queryOne, withTransaction } from '@trustroute/shared';
 import type { UserRow } from '@trustroute/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
-import { getTrustScoreSnapshot } from '../services/trustScore';
+import { getTrustScoreSnapshot, finalizeTrustFactor } from '../services/trustScore';
+import { verifyMsg91AccessToken, Msg91Error } from '../services/msg91';
 import { checkHandleAvailability } from '../services/handleValidation';
 import { changeUserHandle, getHandleChangeStatus } from '../services/handleChange';
 import {
@@ -121,6 +123,104 @@ meRouter.patch('/', requireAuth, async (req: Request, res: Response, next: NextF
     res.json({ ok: true, data: user });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
+// ─── Phone (optional, added later via MSG91 OTP widget) ──────────────────────
+
+/** Loads the same profile shape as GET /me (used after phone link/unlink). */
+async function loadMeProfile(userId: string) {
+  const user = await queryOne<UserRow>(
+    `SELECT user_id, handle, display_name, avatar_url, trust_tier, trust_score,
+            identity_id, account_status, legal_name, phone_e164, email, profession, bio,
+            business_info, organisation, address, language_pref,
+            onboarding_complete, discovery_mode, discovery_contact_book_matching,
+            discovery_show_trust_score, shadow_trust_enabled, handle_changed_at,
+            is_under_review, review_reason, created_at
+     FROM users WHERE user_id = $1`,
+    [userId],
+  );
+  if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'User not found.');
+  const factors = await query<{ factor_type: string; status: string }>(
+    `SELECT factor_type, status FROM trust_factors WHERE user_id = $1`,
+    [userId],
+  );
+  return {
+    ...user,
+    verified_factors: factors.filter((f) => f.status === 'completed').map((f) => f.factor_type),
+  };
+}
+
+const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
+
+// POST /me/phone — link an optional phone number after verifying the MSG91 widget token.
+meRouter.post('/phone', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { access_token } = z.object({ access_token: z.string().min(10) }).parse(req.body ?? {});
+    const { phone_e164 } = await verifyMsg91AccessToken(access_token);
+    const phoneHash = sha256(phone_e164);
+
+    // One phone → one account (amongst live accounts).
+    const clash = await queryOne<{ user_id: string }>(
+      `SELECT user_id FROM users
+        WHERE phone_e164 = $1 AND user_id <> $2
+          AND account_status IN ('active','under_review','restricted','suspended')`,
+      [phone_e164, req.user!.sub],
+    );
+    if (clash) {
+      throw new AppError(409, 'PHONE_REGISTERED',
+        'This phone number is already linked to another TrustRoute account.');
+    }
+
+    try {
+      await withTransaction(async (client) => {
+        await client.query(
+          `UPDATE users SET phone_e164 = $2, phone_hash = $3, updated_at = NOW() WHERE user_id = $1`,
+          [req.user!.sub, phone_e164, phoneHash],
+        );
+        await client.query(
+          `INSERT INTO trust_factors (user_id, factor_type, status, provider, score_delta, verified_at, is_latest)
+           VALUES ($1, 'phone_verified', 'completed', 'msg91', 15, NOW(), TRUE)
+           ON CONFLICT (user_id, factor_type) WHERE is_latest = TRUE
+           DO UPDATE SET status = 'completed', verified_at = NOW(), provider = 'msg91'`,
+          [req.user!.sub],
+        );
+      });
+    } catch (dbErr) {
+      if ((dbErr as { code?: string })?.code === '23505') {
+        throw new AppError(409, 'PHONE_REGISTERED',
+          'This phone number is already linked to another TrustRoute account.');
+      }
+      throw dbErr;
+    }
+
+    await finalizeTrustFactor(req.user!.sub, 'phone_verified');
+    res.json({ ok: true, data: await loadMeProfile(req.user!.sub) });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    if (err instanceof Msg91Error) return next(new AppError(err.httpStatus, err.code, err.message));
+    next(err);
+  }
+});
+
+// DELETE /me/phone — remove the optional phone number.
+meRouter.delete('/phone', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    await withTransaction(async (client) => {
+      await client.query(
+        `UPDATE users SET phone_e164 = NULL, phone_hash = NULL, updated_at = NOW() WHERE user_id = $1`,
+        [req.user!.sub],
+      );
+      await client.query(
+        `UPDATE trust_factors SET status = 'expired'
+          WHERE user_id = $1 AND factor_type = 'phone_verified' AND is_latest = TRUE`,
+        [req.user!.sub],
+      );
+    });
+    await finalizeTrustFactor(req.user!.sub, 'phone_removed');
+    res.json({ ok: true, data: await loadMeProfile(req.user!.sub) });
+  } catch (err) {
     next(err);
   }
 });

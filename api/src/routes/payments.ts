@@ -65,17 +65,23 @@ telephonyRouter.post('/webhook', async (req: Request, res: Response, next: NextF
 export const privacySubscriptionRouter = Router();
 privacySubscriptionRouter.use(requireAuth);
 
-const PRIVACY_PACK_PRICE_PAISE = 14900;
-
 privacySubscriptionRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const { PRIVACY_PACK_PRICE_PAISE, isRazorpayConfigured } = await import('../services/razorpay');
     const sub = await queryOne(
       `SELECT plan, status, minutes_included, renews_at, razorpay_sub_id
        FROM privacy_subscriptions WHERE user_id = $1`,
       [req.user!.sub],
     );
     const data = sub ?? { status: 'none' };
-    res.json({ ok: true, data: { ...data, price_paise: PRIVACY_PACK_PRICE_PAISE } });
+    res.json({
+      ok: true,
+      data: {
+        ...data,
+        price_paise: PRIVACY_PACK_PRICE_PAISE,
+        payments_available: isRazorpayConfigured(),
+      },
+    });
   } catch (err) {
     next(err);
   }
@@ -85,20 +91,13 @@ const subscribeSchema = z.object({ plan: z.string().default('privacy_pack') });
 
 privacySubscriptionRouter.post('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { plan } = subscribeSchema.parse(req.body);
-    await query(
-      `INSERT INTO privacy_subscriptions (user_id, plan, status, minutes_included, renews_at)
-       VALUES ($1, $2, 'active', 300, NOW() + INTERVAL '30 days')
-       ON CONFLICT (user_id) DO UPDATE
-         SET plan = EXCLUDED.plan, status = 'active',
-             minutes_included = 300, renews_at = NOW() + INTERVAL '30 days', updated_at = NOW()`,
-      [req.user!.sub, plan],
-    );
-    const sub = await queryOne(
-      `SELECT plan, status, minutes_included, renews_at FROM privacy_subscriptions WHERE user_id = $1`,
-      [req.user!.sub],
-    );
-    res.json({ ok: true, data: { ...sub, price_paise: PRIVACY_PACK_PRICE_PAISE } });
+    subscribeSchema.parse(req.body);
+    const { createPrivacyPackOrder, isRazorpayConfigured } = await import('../services/razorpay');
+    if (!isRazorpayConfigured()) {
+      throw new AppError(503, 'PAYMENTS_UNAVAILABLE', 'Payments are briefly unavailable.');
+    }
+    const order = await createPrivacyPackOrder(req.user!.sub);
+    res.json({ ok: true, data: order });
   } catch (err) {
     if (err instanceof z.ZodError) {
       return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0]!.message));

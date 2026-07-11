@@ -189,14 +189,25 @@ let _provider: TelephonyProvider | null = null;
 
 export function getTelephonyProvider(): TelephonyProvider {
   if (_provider) return _provider;
-  const name = (process.env.TELEPHONY_PROVIDER ?? 'mock').toLowerCase();
-  _provider = name === 'exotel' ? new ExotelTelephonyProvider() : new MockTelephonyProvider();
-  return _provider;
+  const name = (process.env.TELEPHONY_PROVIDER ?? '').toLowerCase();
+  if (name === 'exotel') {
+    _provider = new ExotelTelephonyProvider();
+    return _provider;
+  }
+  if (name === 'mock' || process.env.NODE_ENV !== 'production') {
+    _provider = new MockTelephonyProvider();
+    return _provider;
+  }
+  throw new AppError(
+    503,
+    'TELEPHONY_UNAVAILABLE',
+    'Masked calling is briefly unavailable. Set TELEPHONY_PROVIDER=exotel in production.',
+  );
 }
 
 export function verifyTelephonyWebhook(req: { headers: Record<string, string | string[] | undefined> }): boolean {
-  const provider = (process.env.TELEPHONY_PROVIDER ?? 'mock').toLowerCase();
-  if (provider === 'mock') {
+  const provider = (process.env.TELEPHONY_PROVIDER ?? '').toLowerCase();
+  if (provider === 'mock' || (!provider && process.env.NODE_ENV !== 'production')) {
     return req.headers['x-telephony-signature'] === 'mock-dev';
   }
   const secret = process.env.TELEPHONY_WEBHOOK_SECRET;

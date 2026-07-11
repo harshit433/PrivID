@@ -74,3 +74,51 @@ export async function checkLiveness(image: Buffer): Promise<LivenessResult> {
 
   return { real, score: score || (real ? 1 : 0), raw: data };
 }
+
+export function faceMatchThreshold(): number {
+  const raw = Number(process.env.FACE_MATCH_THRESHOLD);
+  if (!Number.isFinite(raw) || raw <= 0) return 0.7;
+  return raw > 1 ? raw / 100 : raw;
+}
+
+export interface FaceMatchResult {
+  matched: boolean;
+  score: number;
+  raw: unknown;
+}
+
+const LUXAND_SIMILARITY_URL = 'https://api.luxand.cloud/photo/similarity';
+
+/** Compare DigiLocker / KYC photo to the live selfie (Luxand similarity). */
+export async function compareFaces(docPhoto: Buffer, selfie: Buffer): Promise<FaceMatchResult> {
+  const token = process.env.LUXAND_API_TOKEN!.trim();
+  const form = new FormData();
+  form.append('photo1', new Blob([new Uint8Array(docPhoto)], { type: 'image/jpeg' }), 'doc.jpg');
+  form.append('photo2', new Blob([new Uint8Array(selfie)], { type: 'image/jpeg' }), 'selfie.jpg');
+
+  let data: any;
+  try {
+    const resp = await axios.post(LUXAND_SIMILARITY_URL, form, {
+      headers: { token },
+      timeout: 25000,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    });
+    data = resp.data;
+  } catch (err: any) {
+    const detail =
+      err?.response?.data?.error ||
+      err?.response?.data?.message ||
+      err?.message ||
+      'face match provider error';
+    throw Object.assign(new Error(String(detail)), { code: 'FACE_MATCH_PROVIDER_ERROR' });
+  }
+
+  let score = 0;
+  if (typeof data?.score === 'number') score = data.score;
+  else if (typeof data?.similarity === 'number') score = data.similarity;
+  else if (typeof data?.probability === 'number') score = data.probability;
+  if (score > 1) score = score / 100;
+
+  return { matched: score >= faceMatchThreshold(), score, raw: data };
+}

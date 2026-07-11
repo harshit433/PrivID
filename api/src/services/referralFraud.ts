@@ -17,7 +17,7 @@ async function getFaceOrDocRef(userId: string): Promise<string | null> {
   const row = await queryOne<{ ref: string | null }>(
     `SELECT COALESCE(i.face_ref, u.kyc_doc_hash) AS ref
      FROM users u
-     LEFT JOIN identities i ON i.user_id = u.user_id
+     LEFT JOIN identities i ON i.identity_id = u.identity_id
      WHERE u.user_id = $1`,
     [userId],
   );

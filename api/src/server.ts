@@ -44,6 +44,7 @@ import {
   routeByApiKey,
   businessChannelsRouter,
   businessSubscriptionsRouter,
+  businessMeAuthedRouter,
 } from './mountBusinessSuite';
 import { errorHandler } from './middleware/errorHandler';
 import { requestIdMiddleware } from './middleware/requestId';
@@ -187,7 +188,8 @@ app.use('/register', publicLimiter, businessRegisterRouter);
 app.use('/auth', publicLimiter, authRouter);
 app.use('/onboarding', publicLimiter, onboardingRouter);
 app.use('/users', apiLimiter, usersRouter);
-app.use('/me', apiLimiter, meRouter);
+// Consumer JWT /me vs business API-key /me — same dual-mount pattern as /channels.
+app.use('/me', apiLimiter, routeByApiKey(businessMeAuthedRouter, meRouter));
 app.use('/connections', apiLimiter, connectionsRouter);
 app.use('/status', apiLimiter, statusRouter);
 app.use(

@@ -20,7 +20,7 @@ import {
   fetchAadhaar,
   DigilockerError,
 } from '../services/digilocker';
-import { isLivenessConfigured, checkLiveness, livenessThreshold } from '../services/liveness';
+import { isLivenessConfigured, checkLiveness, livenessThreshold, compareFaces, faceMatchThreshold } from '../services/liveness';
 import { recomputeAndPersist } from '../services/trustScore';
 import { buildHandleCandidates } from '../utils/handles';
 import { assertCanAuthenticate, getLatestAppeal } from '../services/accountState';
@@ -331,10 +331,19 @@ onboardingRouter.post('/digilocker/complete', async (req: Request, res: Response
                 identity_id = $4,
                 matched_user_id = $5,
                 branch = $6,
+                doc_photo_b64 = COALESCE($7, doc_photo_b64),
                 updated_at = NOW()
           WHERE session_id = $1
           RETURNING *`,
-        [session_id, aadhaar.legalName, aadhaar.docHash, identity.identity_id, matchedUserId, branch],
+        [
+          session_id,
+          aadhaar.legalName,
+          aadhaar.docHash,
+          identity.identity_id,
+          matchedUserId,
+          branch,
+          aadhaar.photoBase64 ?? null,
+        ],
       );
       return updated.rows;
     });
@@ -415,10 +424,11 @@ onboardingRouter.post('/liveness/complete', async (req: Request, res: Response, 
     const [updated] = await query<OnboardingSessionRow>(
       `UPDATE onboarding_sessions
           SET status = 'liveness_verified',
+              selfie_b64 = $2,
               updated_at = NOW()
         WHERE session_id = $1
         RETURNING *`,
-      [body.session_id],
+      [body.session_id, b64],
     );
 
     res.json({
@@ -448,6 +458,37 @@ onboardingRouter.post('/match', async (req: Request, res: Response, next: NextFu
       throw new AppError(409, 'LIVENESS_REQUIRED', 'Complete the face check before matching.');
     }
 
+    // Face-to-document match when both photos are available.
+    const docB64 = session.doc_photo_b64;
+    const selfieB64 = session.selfie_b64;
+    if (docB64 && selfieB64 && isLivenessConfigured()) {
+      const docBuf = Buffer.from(docB64.includes(',') ? docB64.slice(docB64.indexOf(',') + 1) : docB64, 'base64');
+      const selfieBuf = Buffer.from(selfieB64.includes(',') ? selfieB64.slice(selfieB64.indexOf(',') + 1) : selfieB64, 'base64');
+      const match = await compareFaces(docBuf, selfieBuf).catch((err: Error) => {
+        logger.error('onboarding/match', 'Face match provider failed', { error: err.message });
+        throw new AppError(502, 'FACE_MATCH_FAILED', 'Face matching is temporarily unavailable. Please try again.');
+      });
+      if (!match.matched) {
+        throw new AppError(
+          400,
+          'FACE_MISMATCH',
+          `Your face didn't match your document. Please retry in better lighting.`,
+        );
+      }
+    } else if (process.env.NODE_ENV === 'production' && process.env.ALLOW_SKIP_FACE_MATCH !== 'true') {
+      // DigiLocker didn't return a photo — fail closed in prod unless explicitly allowed.
+      if (!docB64) {
+        throw new AppError(
+          503,
+          'FACE_MATCH_UNAVAILABLE',
+          'We could not verify your face against your document right now. Please try again later.',
+        );
+      }
+      if (!selfieB64) {
+        throw new AppError(409, 'LIVENESS_REQUIRED', 'Complete the face check before matching.');
+      }
+    }
+
     const identity = await queryOne<IdentityRow>(
       `SELECT * FROM identities WHERE identity_id = $1`,
       [session.identity_id],
@@ -466,13 +507,21 @@ onboardingRouter.post('/match', async (req: Request, res: Response, next: NextFu
           SET status = 'matched',
               branch = $2,
               matched_user_id = COALESCE($3, matched_user_id),
+              doc_photo_b64 = NULL,
+              selfie_b64 = NULL,
               updated_at = NOW()
         WHERE session_id = $1
         RETURNING *`,
       [session_id, branch, matchedUserId],
     );
 
-    res.json({ ok: true, data: await buildStatusPayload(updated) });
+    res.json({
+      ok: true,
+      data: {
+        ...(await buildStatusPayload(updated)),
+        face_match: { threshold: faceMatchThreshold() },
+      },
+    });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
     next(err);

@@ -491,15 +491,31 @@ export async function createPaymentOrderRecord(
   userId: string,
   packId: string,
   razorpayOrderId: string,
+  amountPaise?: number,
 ): Promise<{ order_id: string; amount_paise: number }> {
-  const pack = packById(packId);
+  const amount = amountPaise ?? packById(packId).amount_paise;
   const row = await queryOne<{ order_id: string }>(
     `INSERT INTO payment_orders (user_id, razorpay_order_id, amount_paise, pack_id)
      VALUES ($1, $2, $3, $4)
      RETURNING order_id`,
-    [userId, razorpayOrderId, pack.amount_paise, packId],
+    [userId, razorpayOrderId, amount, packId],
   );
-  return { order_id: row!.order_id, amount_paise: pack.amount_paise };
+  return { order_id: row!.order_id, amount_paise: amount };
+}
+
+export async function activatePrivacyPack(
+  userId: string,
+  razorpayOrderId: string,
+): Promise<void> {
+  await query(
+    `INSERT INTO privacy_subscriptions (user_id, plan, status, minutes_included, renews_at, razorpay_sub_id)
+     VALUES ($1, 'privacy_pack', 'active', 300, NOW() + INTERVAL '30 days', $2)
+     ON CONFLICT (user_id) DO UPDATE
+       SET plan = 'privacy_pack', status = 'active',
+           minutes_included = 300, renews_at = NOW() + INTERVAL '30 days',
+           razorpay_sub_id = EXCLUDED.razorpay_sub_id, updated_at = NOW()`,
+    [userId, razorpayOrderId],
+  );
 }
 
 export async function markPaymentOrderPaid(

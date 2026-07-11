@@ -4,15 +4,23 @@
  */
 import express, { Express, Router, Request, Response, NextFunction } from 'express';
 import { businessApiRateLimit } from '../../business-api/src/middleware/rateLimit';
-import { meRouter } from '../../business-api/src/routes/me';
+import { meRouter as businessMeRouter } from '../../business-api/src/routes/me';
 import { channelsRouter as businessChannelsRouter } from '../../business-api/src/routes/channels';
 import { subscriptionsRouter as businessSubscriptionsRouter } from '../../business-api/src/routes/subscriptions';
 import { messagesRouter } from '../../business-api/src/routes/messages';
 import { analyticsRouter } from '../../business-api/src/routes/analytics';
 
-export { businessChannelsRouter, businessSubscriptionsRouter };
+export { businessChannelsRouter, businessSubscriptionsRouter, businessMeRouter };
 
-/** Consumer + business share /channels and /subscriptions — route by x-api-key vs JWT. */
+/** Business /me with rate limit, ready for routeByApiKey. */
+export const businessMeAuthedRouter: Router = (() => {
+  const biz = Router();
+  biz.use(businessApiRateLimit);
+  biz.use(businessMeRouter);
+  return biz;
+})();
+
+/** Consumer + business share /channels, /subscriptions, /me — route by x-api-key vs JWT. */
 export function routeByApiKey(businessRouter: Router, consumerRouter: Router): Router {
   const router = Router({ mergeParams: true });
   router.use((req: Request, res: Response, next: NextFunction) => {
@@ -25,10 +33,11 @@ export function routeByApiKey(businessRouter: Router, consumerRouter: Router): R
   return router;
 }
 
+/** Business-only routes that do not collide with consumer JWT paths. */
 export function mountBusinessSuite(app: Express): void {
   const authed = express.Router();
   authed.use(businessApiRateLimit);
-  authed.use('/me', meRouter);
+  // /me is mounted via routeByApiKey in server.ts (must not be shadowed by consumer /me)
   authed.use('/messages', messagesRouter);
   authed.use('/analytics', analyticsRouter);
   app.use(authed);

@@ -95,6 +95,8 @@ export interface OnboardingSessionRow {
   branch: 'new' | 'self_deleted' | 'active' | 'suspended' | 'banned' | 'ousted' | 'no_match' | null;
   selected_handle: string | null;
   pending_display_name: string | null;
+  doc_photo_b64: string | null;
+  selfie_b64: string | null;
   expires_at: Date;
   completed_at: Date | null;
   created_at: Date;

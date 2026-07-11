@@ -37,6 +37,9 @@ async function razorpayXFetch(path: string, body: unknown): Promise<Record<strin
 
 export async function createRazorpayContact(userId: string, name: string, email?: string): Promise<string> {
   if (!isRazorpayXConfigured()) {
+    if (process.env.NODE_ENV === 'production' && process.env.RAZORPAYX_MOCK !== 'true') {
+      throw new AppError(503, 'PAYOUTS_UNAVAILABLE', 'Withdrawals are briefly unavailable — try again soon.');
+    }
     return `mock_contact_${userId.slice(0, 8)}`;
   }
   const data = await razorpayXFetch('/contacts', {
@@ -53,6 +56,9 @@ export async function createFundAccountUpi(params: {
   upiId: string;
 }): Promise<string> {
   if (!isRazorpayXConfigured()) {
+    if (process.env.NODE_ENV === 'production' && process.env.RAZORPAYX_MOCK !== 'true') {
+      throw new AppError(503, 'PAYOUTS_UNAVAILABLE', 'Withdrawals are briefly unavailable — try again soon.');
+    }
     return `mock_fa_${crypto.randomBytes(6).toString('hex')}`;
   }
   const data = await razorpayXFetch('/fund_accounts', {
@@ -70,6 +76,9 @@ export async function createFundAccountBank(params: {
   accountNumber: string;
 }): Promise<string> {
   if (!isRazorpayXConfigured()) {
+    if (process.env.NODE_ENV === 'production' && process.env.RAZORPAYX_MOCK !== 'true') {
+      throw new AppError(503, 'PAYOUTS_UNAVAILABLE', 'Withdrawals are briefly unavailable — try again soon.');
+    }
     return `mock_fa_${crypto.randomBytes(6).toString('hex')}`;
   }
   const data = await razorpayXFetch('/fund_accounts', {
@@ -90,6 +99,9 @@ export async function createPayout(params: {
   referenceId: string;
 }): Promise<string> {
   if (!isRazorpayXConfigured()) {
+    if (process.env.NODE_ENV === 'production' && process.env.RAZORPAYX_MOCK !== 'true') {
+      throw new AppError(503, 'PAYOUTS_UNAVAILABLE', 'Withdrawals are briefly unavailable — try again soon.');
+    }
     return `mock_payout_${crypto.randomBytes(6).toString('hex')}`;
   }
   const creds = getRazorpayXCreds()!;

@@ -255,6 +255,7 @@ meRouter.delete('/blocked/:id', requireAuth, async (req: Request, res: Response,
 // ─── GET/PATCH /me/notifications ─────────────────────────────────────────────
 
 const notifSchema = z.object({
+  enabled: z.boolean().optional(),
   calls: z.boolean().optional(),
   messages: z.boolean().optional(),
   group_messages: z.boolean().optional(),

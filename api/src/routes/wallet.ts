@@ -6,6 +6,9 @@ import {
   getWalletSummary,
   getWalletPacks,
   listWalletTransactions,
+  getWalletTransaction,
+  getAutoRechargeSettings,
+  updateAutoRecharge,
 } from '../services/wallet';
 import { createTopUpOrder } from '../services/razorpay';
 
@@ -37,6 +40,43 @@ walletRouter.get('/transactions', async (req: Request, res: Response, next: Next
     const data = await listWalletTransactions(req.user!.sub, limit, offset, filter);
     res.json({ ok: true, data });
   } catch (err) {
+    next(err);
+  }
+});
+
+walletRouter.get('/transactions/:txn_id', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const data = await getWalletTransaction(req.user!.sub, req.params.txn_id!);
+    res.json({ ok: true, data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+walletRouter.get('/auto-recharge', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const data = await getAutoRechargeSettings(req.user!.sub);
+    res.json({ ok: true, data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const autoRechargeSchema = z.object({
+  enabled: z.boolean(),
+  pack_id: z.string().min(1).optional(),
+  threshold_paise: z.number().int().min(1000).optional(),
+});
+
+walletRouter.patch('/auto-recharge', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = autoRechargeSchema.parse(req.body);
+    const data = await updateAutoRecharge(req.user!.sub, body);
+    res.json({ ok: true, data });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0]!.message));
+    }
     next(err);
   }
 });

@@ -65,6 +65,8 @@ telephonyRouter.post('/webhook', async (req: Request, res: Response, next: NextF
 export const privacySubscriptionRouter = Router();
 privacySubscriptionRouter.use(requireAuth);
 
+const PRIVACY_PACK_PRICE_PAISE = 14900;
+
 privacySubscriptionRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const sub = await queryOne(
@@ -72,7 +74,8 @@ privacySubscriptionRouter.get('/', async (req: Request, res: Response, next: Nex
        FROM privacy_subscriptions WHERE user_id = $1`,
       [req.user!.sub],
     );
-    res.json({ ok: true, data: sub ?? { status: 'none' } });
+    const data = sub ?? { status: 'none' };
+    res.json({ ok: true, data: { ...data, price_paise: PRIVACY_PACK_PRICE_PAISE } });
   } catch (err) {
     next(err);
   }
@@ -95,7 +98,7 @@ privacySubscriptionRouter.post('/', async (req: Request, res: Response, next: Ne
       `SELECT plan, status, minutes_included, renews_at FROM privacy_subscriptions WHERE user_id = $1`,
       [req.user!.sub],
     );
-    res.json({ ok: true, data: sub });
+    res.json({ ok: true, data: { ...sub, price_paise: PRIVACY_PACK_PRICE_PAISE } });
   } catch (err) {
     if (err instanceof z.ZodError) {
       return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0]!.message));

@@ -405,6 +405,49 @@ export async function softDeleteMessage(msgId: string, userId: string, forEveryo
   await query(`UPDATE messages SET deleted = TRUE WHERE msg_id = $1`, [msgId]);
 }
 
+export async function clearConversationForUser(convId: string, userId: string): Promise<number> {
+  await assertMember(convId, userId);
+  const rows = await query<{ msg_id: string }>(
+    `UPDATE messages SET deleted = TRUE
+      WHERE conv_id = $1 AND deleted = FALSE
+      RETURNING msg_id`,
+    [convId],
+  );
+  return rows.length;
+}
+
+export type ConversationMediaItem = {
+  msg_id: string;
+  type: string;
+  media_ref: string;
+  body: string | null;
+  created_at: string;
+};
+
+export async function listConversationMedia(
+  convId: string,
+  userId: string,
+  kind?: 'image' | 'video' | 'doc',
+): Promise<ConversationMediaItem[]> {
+  await assertMember(convId, userId);
+  const types =
+    kind === 'image' ? ['image']
+    : kind === 'video' ? ['video']
+    : kind === 'doc' ? ['doc', 'audio']
+    : ['image', 'video', 'doc', 'audio'];
+  return query<ConversationMediaItem>(
+    `SELECT msg_id, type, media_ref, body, created_at
+       FROM messages
+      WHERE conv_id = $1
+        AND deleted = FALSE
+        AND media_ref IS NOT NULL
+        AND type = ANY($2::text[])
+      ORDER BY created_at DESC
+      LIMIT 120`,
+    [convId, types],
+  );
+}
+
 export async function ensureNativeGroupConversation(
   groupId: string,
   name: string,

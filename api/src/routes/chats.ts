@@ -17,6 +17,8 @@ import {
   addReaction,
   removeReaction,
   softDeleteMessage,
+  clearConversationForUser,
+  listConversationMedia,
 } from '../services/nativeChat';
 import { notifyConversationMembers } from '../services/chatPubSub';
 import { chatSendLimiter } from '../middleware/rateLimit';
@@ -218,6 +220,25 @@ chatsRouter.delete('/:id/messages/:msgId', async (req: Request, res: Response, n
     if (err instanceof z.ZodError) {
       return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0]!.message));
     }
+    next(err);
+  }
+});
+
+chatsRouter.post('/:id/clear', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const count = await clearConversationForUser(req.params.id!, req.user!.sub);
+    res.json({ ok: true, data: { cleared: count } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+chatsRouter.get('/:id/media', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const kind = req.query.kind as 'image' | 'video' | 'doc' | undefined;
+    const data = await listConversationMedia(req.params.id!, req.user!.sub, kind);
+    res.json({ ok: true, data });
+  } catch (err) {
     next(err);
   }
 });

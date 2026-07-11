@@ -22,6 +22,7 @@ export interface TelephonyProvider {
     virtualNumber: string;
     callbackUrl: string;
   }): Promise<TelephonyBridgeResult>;
+  sendDtmf?(providerRef: string, digits: string): Promise<void>;
   parseWebhook(body: unknown, signature?: string): TelephonyWebhookEvent | null;
 }
 
@@ -79,6 +80,10 @@ class MockTelephonyProvider implements TelephonyProvider {
       event: b.event as TelephonyWebhookEvent['event'],
       billed_seconds: b.billed_seconds,
     };
+  }
+
+  async sendDtmf(_providerRef: string, _digits: string): Promise<void> {
+    /* mock — no-op in dev */
   }
 }
 
@@ -154,6 +159,29 @@ class ExotelTelephonyProvider implements TelephonyProvider {
 
     const billed = b.DialCallDuration ? parseInt(b.DialCallDuration, 10) : undefined;
     return { provider_ref: ref, event, billed_seconds: billed };
+  }
+
+  async sendDtmf(providerRef: string, digits: string): Promise<void> {
+    const sid = process.env.EXOTEL_SID;
+    const token = process.env.EXOTEL_TOKEN;
+    const apiKey = process.env.EXOTEL_API_KEY;
+    if (!sid || !token || !apiKey) {
+      throw new AppError(503, 'TELEPHONY_UNAVAILABLE', 'Telephony provider not configured.');
+    }
+    const url = `https://api.exotel.com/v1/Accounts/${sid}/Calls/${providerRef}.json`;
+    const body = new URLSearchParams({ Digits: digits });
+    const auth = Buffer.from(`${apiKey}:${token}`).toString('base64');
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${auth}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: body.toString(),
+    });
+    if (!res.ok) {
+      throw new AppError(502, 'TELEPHONY_ERROR', 'Could not send keypad tone.');
+    }
   }
 }
 

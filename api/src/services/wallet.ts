@@ -24,6 +24,8 @@ export interface WalletSummary {
     renews_at: string | null;
   } | null;
   auto_recharge_enabled: boolean;
+  auto_recharge_pack_id: string | null;
+  auto_recharge_threshold_paise: number | null;
 }
 
 export interface WalletTransaction {
@@ -75,7 +77,11 @@ export async function getWalletSummary(userId: string): Promise<WalletSummary> {
     queryOne<{
       balance_paise: string;
       auto_recharge_enabled: boolean;
-    }>(`SELECT balance_paise::text, auto_recharge_enabled FROM wallets WHERE user_id = $1`, [userId]),
+      auto_recharge_pack_id: string | null;
+      auto_recharge_threshold_paise: string | null;
+    }>(`SELECT balance_paise::text, auto_recharge_enabled, auto_recharge_pack_id,
+               auto_recharge_threshold_paise::text
+        FROM wallets WHERE user_id = $1`, [userId]),
     queryOne<{
       plan: string;
       status: string;
@@ -101,6 +107,10 @@ export async function getWalletSummary(userId: string): Promise<WalletSummary> {
         }
       : null,
     auto_recharge_enabled: wallet?.auto_recharge_enabled ?? false,
+    auto_recharge_pack_id: wallet?.auto_recharge_pack_id ?? null,
+    auto_recharge_threshold_paise: wallet?.auto_recharge_threshold_paise
+      ? parseInt(wallet.auto_recharge_threshold_paise, 10)
+      : null,
   };
 }
 
@@ -154,6 +164,116 @@ export async function listWalletTransactions(
 
 export function getWalletPacks(): TopUpPack[] {
   return DEFAULT_PACKS;
+}
+
+export async function getWalletTransaction(
+  userId: string,
+  txnId: string,
+): Promise<WalletTransaction> {
+  const row = await queryOne<WalletTransaction>(
+    `SELECT txn_id, type, amount_paise, minutes, ref, status, balance_after, meta, created_at
+     FROM wallet_transactions WHERE txn_id = $1 AND user_id = $2`,
+    [txnId, userId],
+  );
+  if (!row) throw new AppError(404, 'NOT_FOUND', 'Transaction not found.');
+  return {
+    ...row,
+    amount_paise: Number(row.amount_paise),
+    balance_after: row.balance_after != null ? Number(row.balance_after) : null,
+    created_at: new Date(row.created_at as unknown as string).toISOString(),
+  };
+}
+
+export type AutoRechargeSettings = {
+  enabled: boolean;
+  pack_id: string | null;
+  threshold_paise: number | null;
+  packs: TopUpPack[];
+};
+
+export async function getAutoRechargeSettings(userId: string): Promise<AutoRechargeSettings> {
+  await ensureWallet(userId);
+  const row = await queryOne<{
+    auto_recharge_enabled: boolean;
+    auto_recharge_pack_id: string | null;
+    auto_recharge_threshold_paise: string | null;
+  }>(
+    `SELECT auto_recharge_enabled, auto_recharge_pack_id, auto_recharge_threshold_paise::text
+     FROM wallets WHERE user_id = $1`,
+    [userId],
+  );
+  return {
+    enabled: row?.auto_recharge_enabled ?? false,
+    pack_id: row?.auto_recharge_pack_id ?? null,
+    threshold_paise: row?.auto_recharge_threshold_paise
+      ? parseInt(row.auto_recharge_threshold_paise, 10)
+      : null,
+    packs: DEFAULT_PACKS,
+  };
+}
+
+export async function updateAutoRecharge(
+  userId: string,
+  params: { enabled: boolean; pack_id?: string; threshold_paise?: number },
+): Promise<AutoRechargeSettings> {
+  await ensureWallet(userId);
+  if (params.enabled) {
+    if (!params.pack_id) throw new AppError(400, 'PACK_REQUIRED', 'Select a top-up pack.');
+    packById(params.pack_id);
+    const threshold = params.threshold_paise ?? 5000;
+    if (threshold < 1000) {
+      throw new AppError(400, 'THRESHOLD_TOO_LOW', 'Threshold must be at least ₹10.');
+    }
+    await query(
+      `UPDATE wallets
+       SET auto_recharge_enabled = TRUE,
+           auto_recharge_pack_id = $2,
+           auto_recharge_threshold_paise = $3,
+           updated_at = NOW()
+       WHERE user_id = $1`,
+      [userId, params.pack_id, threshold],
+    );
+  } else {
+    await query(
+      `UPDATE wallets SET auto_recharge_enabled = FALSE, updated_at = NOW() WHERE user_id = $1`,
+      [userId],
+    );
+  }
+  return getAutoRechargeSettings(userId);
+}
+
+/** Trigger auto-recharge order when balance drops below threshold (best-effort). */
+export async function maybeTriggerAutoRecharge(userId: string): Promise<{ triggered: boolean }> {
+  const row = await queryOne<{
+    balance_paise: string;
+    auto_recharge_enabled: boolean;
+    auto_recharge_pack_id: string | null;
+    auto_recharge_threshold_paise: string | null;
+  }>(
+    `SELECT balance_paise::text, auto_recharge_enabled, auto_recharge_pack_id,
+            auto_recharge_threshold_paise::text
+     FROM wallets WHERE user_id = $1`,
+    [userId],
+  );
+  if (!row?.auto_recharge_enabled || !row.auto_recharge_pack_id) return { triggered: false };
+  const balance = parseInt(row.balance_paise ?? '0', 10);
+  const threshold = parseInt(row.auto_recharge_threshold_paise ?? '0', 10);
+  if (balance > threshold) return { triggered: false };
+
+  const recent = await queryOne<{ cnt: string }>(
+    `SELECT COUNT(*)::text AS cnt FROM payment_orders
+     WHERE user_id = $1 AND status = 'created' AND created_at > NOW() - INTERVAL '30 minutes'`,
+    [userId],
+  );
+  if (parseInt(recent?.cnt ?? '0', 10) > 0) return { triggered: false };
+
+  try {
+    const { createTopUpOrder } = await import('./razorpay');
+    await createTopUpOrder(userId, row.auto_recharge_pack_id);
+    return { triggered: true };
+  } catch {
+    return { triggered: false };
+  }
 }
 
 function packById(packId: string): TopUpPack {

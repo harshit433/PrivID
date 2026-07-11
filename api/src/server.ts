@@ -30,6 +30,7 @@ import { payoutsRouter } from './routes/payouts';
 import { configRouter } from './routes/config';
 import { walletRouter } from './routes/wallet';
 import { maskedRouter } from './routes/masked';
+import { sharesRouter } from './routes/shares';
 import { chatsRouter } from './routes/chats';
 import { mediaRouter } from './routes/media';
 import {
@@ -203,6 +204,7 @@ app.use('/payouts', apiLimiter, payoutsRouter);
 app.use('/config', publicLimiter, configRouter);
 app.use('/wallet', apiLimiter, walletRouter);
 app.use('/masked', apiLimiter, maskedRouter);
+app.use('/shares', apiLimiter, sharesRouter);
 app.use('/chats', apiLimiter, chatsRouter);
 app.use('/media', apiLimiter, mediaRouter);
 app.use('/subscription', apiLimiter, privacySubscriptionRouter);

@@ -285,6 +285,93 @@ export async function getMaskedCall(callId: string, userId?: string) {
   };
 }
 
+export async function cancelMaskedCall(callId: string, userId: string): Promise<{ cancelled: boolean }> {
+  const call = await queryOne<{
+    call_id: string;
+    caller_id: string;
+    hold_paise: number;
+    status: string;
+  }>(
+    `SELECT call_id, caller_id, hold_paise, status FROM masked_calls WHERE call_id = $1`,
+    [callId],
+  );
+  if (!call) throw new AppError(404, 'NOT_FOUND', 'Call not found.');
+  if (call.caller_id !== userId) throw new AppError(403, 'FORBIDDEN', 'Not your call.');
+  if (['ended', 'failed', 'cancelled'].includes(call.status)) {
+    return { cancelled: true };
+  }
+
+  await query(
+    `UPDATE masked_calls SET status = 'cancelled', ended_at = NOW() WHERE call_id = $1`,
+    [callId],
+  );
+
+  if (call.hold_paise > 0) {
+    const { releaseHold } = await import('./wallet');
+    await releaseHold(userId, call.hold_paise, `${callId}:hold`).catch(() => {});
+  }
+
+  const { maybeTriggerAutoRecharge } = await import('./wallet');
+  void maybeTriggerAutoRecharge(userId);
+
+  return { cancelled: true };
+}
+
+export async function sendMaskedCallDtmf(
+  callId: string,
+  userId: string,
+  digit: string,
+): Promise<{ sent: boolean }> {
+  if (!/^[0-9*#]$/.test(digit)) {
+    throw new AppError(400, 'VALIDATION_ERROR', 'Invalid keypad digit.');
+  }
+  const call = await queryOne<{ caller_id: string; provider_ref: string | null; status: string }>(
+    `SELECT caller_id, provider_ref, status FROM masked_calls WHERE call_id = $1`,
+    [callId],
+  );
+  if (!call) throw new AppError(404, 'NOT_FOUND', 'Call not found.');
+  if (call.caller_id !== userId) throw new AppError(403, 'FORBIDDEN', 'Not your call.');
+  if (call.status !== 'connected') {
+    throw new AppError(400, 'CALL_NOT_ACTIVE', 'Keypad is available once the call connects.');
+  }
+  if (!call.provider_ref) {
+    throw new AppError(503, 'TELEPHONY_UNAVAILABLE', 'Call leg not ready for keypad.');
+  }
+  const provider = getTelephonyProvider();
+  if (!provider.sendDtmf) {
+    throw new AppError(503, 'TELEPHONY_UNAVAILABLE', 'Keypad not supported for this provider.');
+  }
+  await provider.sendDtmf(call.provider_ref, digit);
+  return { sent: true };
+}
+
+export async function listRecentMaskedCalls(userId: string, limit = 20): Promise<Array<{
+  call_id: string;
+  callee_display: string | null;
+  status: string;
+  billed_seconds: number;
+  cost_paise: number;
+  created_at: string;
+}>> {
+  const rows = await query<{
+    call_id: string;
+    callee_display: string | null;
+    status: string;
+    billed_seconds: number;
+    cost_paise: number;
+    created_at: Date;
+  }>(
+    `SELECT call_id, callee_display, status, billed_seconds, cost_paise, created_at
+     FROM masked_calls WHERE caller_id = $1
+     ORDER BY created_at DESC LIMIT $2`,
+    [userId, limit],
+  );
+  return rows.map((r) => ({
+    ...r,
+    created_at: new Date(r.created_at).toISOString(),
+  }));
+}
+
 export async function processTelephonyEvent(event: {
   provider_ref: string;
   event: string;

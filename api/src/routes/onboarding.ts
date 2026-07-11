@@ -182,6 +182,14 @@ async function buildStatusPayload(session: OnboardingSessionRow): Promise<object
     userId: session.matched_user_id,
     identityId: session.identity_id,
   });
+  let lastHandle: string | null = null;
+  if (session.identity_id) {
+    const identity = await queryOne<{ last_handle: string | null }>(
+      `SELECT last_handle FROM identities WHERE identity_id = $1`,
+      [session.identity_id],
+    );
+    lastHandle = identity?.last_handle ?? null;
+  }
   return {
     session_id: session.session_id,
     purpose: session.purpose,
@@ -191,6 +199,7 @@ async function buildStatusPayload(session: OnboardingSessionRow): Promise<object
     matched_user_id: session.matched_user_id,
     legal_name: session.legal_name,
     selected_handle: session.selected_handle,
+    last_handle: lastHandle,
     expires_at: new Date(session.expires_at).toISOString(),
     appeal,
   };
@@ -220,6 +229,27 @@ onboardingRouter.post('/start', async (req: Request, res: Response, next: NextFu
         new Date(Date.now() + SESSION_TTL_MS),
       ],
     );
+
+    if (fingerprintHash) {
+      const blocked = await queryOne<{ user_id: string }>(
+        `SELECT u.user_id
+           FROM onboarding_sessions os
+           JOIN users u ON u.user_id = os.matched_user_id
+          WHERE os.device_fingerprint_hash = $1
+            AND u.account_status IN ('banned', 'ousted')
+          LIMIT 1`,
+        [fingerprintHash],
+      );
+      if (blocked) {
+        throw new AppError(
+          403,
+          'DEVICE_BANNED',
+          'This device cannot be used with TrustRoute. You can request a review.',
+          { session_id: session.session_id },
+        );
+      }
+    }
+
     res.status(201).json({ ok: true, data: await buildStatusPayload(session) });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
@@ -404,6 +434,87 @@ onboardingRouter.post('/liveness/complete', async (req: Request, res: Response, 
   }
 });
 
+// ─── POST /onboarding/match ───────────────────────────────────────────────────
+// ON-12 · Face-match + dedup after liveness — sets status to matched.
+
+onboardingRouter.post('/match', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { session_id } = sessionSchema.parse(req.body);
+    const session = await getSession(session_id);
+    if (!session.identity_id || !session.legal_name) {
+      throw new AppError(409, 'IDENTITY_NOT_VERIFIED', 'Verify with DigiLocker before matching.');
+    }
+    if (session.status !== 'liveness_verified' && session.status !== 'matched') {
+      throw new AppError(409, 'LIVENESS_REQUIRED', 'Complete the face check before matching.');
+    }
+
+    const identity = await queryOne<IdentityRow>(
+      `SELECT * FROM identities WHERE identity_id = $1`,
+      [session.identity_id],
+    );
+    const user = session.matched_user_id
+      ? await queryOne<Pick<UserRow, 'user_id' | 'account_status'>>(
+          `SELECT user_id, account_status FROM users WHERE user_id = $1`,
+          [session.matched_user_id],
+        )
+      : null;
+    const branch = branchForIdentity(identity, user);
+    const matchedUserId = identity?.current_user_id ?? session.matched_user_id ?? null;
+
+    const [updated] = await query<OnboardingSessionRow>(
+      `UPDATE onboarding_sessions
+          SET status = 'matched',
+              branch = $2,
+              matched_user_id = COALESCE($3, matched_user_id),
+              updated_at = NOW()
+        WHERE session_id = $1
+        RETURNING *`,
+      [session_id, branch, matchedUserId],
+    );
+
+    res.json({ ok: true, data: await buildStatusPayload(updated) });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
+// ─── POST /onboarding/handle ──────────────────────────────────────────────────
+// ON-17 · Reserve handle + display name without creating the user account.
+
+const setHandleSchema = z.object({
+  session_id: z.string().uuid(),
+  handle: z.string().min(3).max(30),
+  display_name: z.string().min(2).max(60).optional(),
+});
+
+onboardingRouter.post('/handle', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = setHandleSchema.parse(req.body);
+    const session = await getSession(body.session_id);
+    if (session.status !== 'matched' && session.status !== 'liveness_verified') {
+      throw new AppError(409, 'MATCH_REQUIRED', 'Complete identity matching before choosing a handle.');
+    }
+    const handle = await validateHandleForSession(session, body.handle);
+    const [updated] = await query<OnboardingSessionRow>(
+      `UPDATE onboarding_sessions
+          SET selected_handle = $2,
+              pending_display_name = COALESCE($3, pending_display_name, legal_name),
+              updated_at = NOW()
+        WHERE session_id = $1
+        RETURNING *`,
+      [body.session_id, handle, body.display_name?.trim() ?? null],
+    );
+    res.json({ ok: true, data: await buildStatusPayload(updated) });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    if (err instanceof AppError && ['HANDLE_TAKEN', 'HANDLE_INVALID', 'HANDLE_NAME_MISMATCH'].includes(err.code)) {
+      return res.status(err.statusCode).json({ ok: false, error: { code: err.code, message: err.message } });
+    }
+    next(err);
+  }
+});
+
 // ─── GET /onboarding/handle/check ────────────────────────────────────────────
 
 onboardingRouter.get('/handle/check', async (req: Request, res: Response, next: NextFunction) => {
@@ -540,7 +651,7 @@ onboardingRouter.post('/complete', async (req: Request, res: Response, next: Nex
     if (!session.identity_id || !session.doc_hash || !session.legal_name) {
       throw new AppError(409, 'IDENTITY_NOT_VERIFIED', 'Verify with DigiLocker before completing setup.');
     }
-    if (session.status !== 'liveness_verified' && session.status !== 'completed') {
+    if (session.status !== 'liveness_verified' && session.status !== 'matched' && session.status !== 'completed') {
       throw new AppError(409, 'LIVENESS_REQUIRED', 'Complete the face check before finishing setup.');
     }
 
@@ -568,7 +679,8 @@ onboardingRouter.post('/complete', async (req: Request, res: Response, next: Nex
     }
 
     const handle = await validateHandleForSession(session, body.handle ?? session.selected_handle ?? '');
-    const user = await createVerifiedUserFromSession(session, handle, body.display_name, body.phone_e164);
+    const displayName = body.display_name?.trim() || session.pending_display_name || session.legal_name || handle;
+    const user = await createVerifiedUserFromSession(session, handle, displayName, body.phone_e164);
     await recomputeAndPersist(user.user_id).catch(() => {});
     const fresh = await queryOne<UserRow>(`SELECT * FROM users WHERE user_id = $1`, [user.user_id]);
     res.status(201).json(await issueAuthResponse(fresh ?? user, true));

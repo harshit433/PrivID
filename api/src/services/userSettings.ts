@@ -3,6 +3,7 @@ import type { UserRow } from '@trustroute/shared';
 import { AppError } from '../middleware/errorHandler';
 
 export interface NotificationPrefs {
+  enabled: boolean;
   calls: boolean;
   messages: boolean;
   group_messages: boolean;
@@ -19,6 +20,7 @@ export interface UserConsents {
 }
 
 const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
+  enabled: true,
   calls: true,
   messages: true,
   group_messages: true,

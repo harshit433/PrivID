@@ -19,9 +19,12 @@ import { logger } from '../utils/logger';
  *   SETU_DG_PRODUCT_INSTANCE_ID  x-product-instance-id
  *   SETU_DG_REDIRECT_URL         public HTTPS return URL after DigiLocker consent
  *                                (prod: https://www.trustroute.live/digilocker/)
+ *   SETU_DG_PROXY_BASE_URL       optional India egress proxy (Railway is SG; Setu
+ *                                is India-IP-only). Example: https://xxx.fly.dev
+ *   SETU_DG_PROXY_SECRET         shared secret sent as x-proxy-secret when proxying
  *
- * Transport note: Setu’s edge returns a bare nginx 403 to some Node TLS
- * fingerprints from cloud egress. We call Setu via `curl` (same as Bridge docs).
+ * Transport note: Setu returns nginx 403 from non-India IPs. We call via `curl`,
+ * optionally through SETU_DG_PROXY_BASE_URL hosted in Mumbai (bom).
  *
  * If the credentials are absent we throw a typed `DIGILOCKER_NOT_CONFIGURED`
  * error (a real, explicit "not set up" — never a fake success).
@@ -70,6 +73,7 @@ interface DgConfig {
   clientSecret: string;
   productInstanceId: string;
   redirectUrl: string;
+  proxySecret?: string;
 }
 
 function getConfig(): DgConfig {
@@ -86,12 +90,16 @@ function getConfig(): DgConfig {
       503,
     );
   }
+  // Prefer India proxy when set — Railway southeast-asia is blocked by Setu geo fence.
+  const proxyBase = process.env.SETU_DG_PROXY_BASE_URL?.trim().replace(/\/$/, '');
+  const directBase = process.env.SETU_DG_BASE_URL?.trim().replace(/\/$/, '') || 'https://dg-sandbox.setu.co';
   return {
-    baseUrl: process.env.SETU_DG_BASE_URL?.trim().replace(/\/$/, '') || 'https://dg-sandbox.setu.co',
+    baseUrl: proxyBase || directBase,
     clientId,
     clientSecret,
     productInstanceId,
     redirectUrl,
+    proxySecret: process.env.SETU_DG_PROXY_SECRET?.trim() || undefined,
   };
 }
 
@@ -124,6 +132,9 @@ async function setuRequest<T>(
     '-H',
     `x-product-instance-id: ${cfg.productInstanceId}`,
   ];
+  if (cfg.proxySecret) {
+    args.push('-H', `x-proxy-secret: ${cfg.proxySecret}`);
+  }
   if (body) {
     args.push('-d', JSON.stringify(body));
   }

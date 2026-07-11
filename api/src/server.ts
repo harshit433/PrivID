@@ -52,6 +52,8 @@ import { apiLimiter, publicLimiter } from './middleware/rateLimit';
 import { getPool, connectRedis, getRedis } from '@trustroute/shared';
 import { isStreamConfigured } from './services/stream';
 import { isLivenessConfigured } from './services/liveness';
+import { isDigilockerConfigured } from './services/digilocker';
+import { digilockerCallbackRouter } from './routes/digilockerCallback';
 import { logger } from './utils/logger';
 
 const app = express();
@@ -127,11 +129,15 @@ app.get('/health', async (_req, res) => {
       redis_ok,
       stream_chat_configured: isStreamConfigured(),
       liveness_configured: isLivenessConfigured(),
+      digilocker_configured: isDigilockerConfigured(),
     });
   } catch (err) {
     res.status(503).json({ ok: false, error: 'DB unavailable' });
   }
 });
+
+// DigiLocker OAuth return (Setu redirects here when SETU_DG_REDIRECT_URL points at the API).
+app.use('/digilocker', publicLimiter, digilockerCallbackRouter);
 
 // ─── Debug: call system health (dev/staging only) ─────────────────────────────
 app.get('/debug/call-health', async (_req, res) => {

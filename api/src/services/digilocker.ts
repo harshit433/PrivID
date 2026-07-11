@@ -16,7 +16,8 @@ import { logger } from '../utils/logger';
  *   SETU_DG_CLIENT_ID            x-client-id
  *   SETU_DG_CLIENT_SECRET        x-client-secret
  *   SETU_DG_PRODUCT_INSTANCE_ID  x-product-instance-id
- *   SETU_DG_REDIRECT_URL         where DigiLocker returns the user after consent
+ *   SETU_DG_REDIRECT_URL         public HTTPS return URL after DigiLocker consent
+ *                                (prod: https://www.trustroute.live/digilocker/callback)
  *
  * If the credentials are absent we throw a typed `DIGILOCKER_NOT_CONFIGURED`
  * error (a real, explicit "not set up" — never a fake success).

@@ -136,6 +136,69 @@ app.get('/health', async (_req, res) => {
   }
 });
 
+// Temporary DigiLocker egress probe (remove after Setu allowlisting).
+app.get('/debug/digilocker-egress', async (_req, res) => {
+  if (process.env.ENABLE_DIGILOCKER_EGRESS_DEBUG !== 'true') {
+    return res.status(404).json({ ok: false, error: 'Not found' });
+  }
+  const { execFile } = await import('child_process');
+  const { promisify } = await import('util');
+  const execFileAsync = promisify(execFile);
+  const cfg = {
+    base: (process.env.SETU_DG_BASE_URL || 'https://dg-sandbox.setu.co').replace(/\/$/, ''),
+    id: process.env.SETU_DG_CLIENT_ID || '',
+    secret: process.env.SETU_DG_CLIENT_SECRET || '',
+    product: process.env.SETU_DG_PRODUCT_INSTANCE_ID || '',
+    redirect: process.env.SETU_DG_REDIRECT_URL || '',
+  };
+  try {
+    const { stdout, stderr } = await execFileAsync(
+      'curl',
+      [
+        '-sS',
+        '-o',
+        '-',
+        '-w',
+        '\nHTTP_CODE:%{http_code}',
+        '--max-time',
+        '20',
+        '-X',
+        'POST',
+        `${cfg.base}/api/digilocker`,
+        '-H',
+        'Content-Type: application/json',
+        '-H',
+        `x-client-id: ${cfg.id}`,
+        '-H',
+        `x-client-secret: ${cfg.secret}`,
+        '-H',
+        `x-product-instance-id: ${cfg.product}`,
+        '-d',
+        JSON.stringify({ redirectUrl: cfg.redirect }),
+      ],
+      { timeout: 25_000, maxBuffer: 64_000 },
+    );
+    const parts = String(stdout).split('\nHTTP_CODE:');
+    const body = parts[0] ?? '';
+    const code = Number(parts[1] || 0);
+    res.json({
+      ok: code >= 200 && code < 300,
+      via: 'curl',
+      http: code,
+      bodyPreview: body.slice(0, 240),
+      stderr: String(stderr || '').slice(0, 200),
+      clientIdPrefix: cfg.id.slice(0, 8),
+    });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      via: 'curl',
+      error: err instanceof Error ? err.message : String(err),
+      clientIdPrefix: cfg.id.slice(0, 8),
+    });
+  }
+});
+
 // DigiLocker OAuth return (Setu redirects here when SETU_DG_REDIRECT_URL points at the API).
 app.use('/digilocker', publicLimiter, digilockerCallbackRouter);
 

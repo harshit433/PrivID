@@ -441,7 +441,8 @@ callsRouter.post('/:id/end', requireAuth, async (req: Request, res: Response, ne
     rtdbUpdateStatus(req.params.id, finalStatus as any).catch(() => {});
 
     // Send cancellation push to the other party so background/killed devices dismiss the notification
-    if (finalStatus === 'missed' || finalStatus === 'declined') {
+    // Include `failed` — caller may abort after initiate if media connect fails while callee is still ringing.
+    if (finalStatus === 'missed' || finalStatus === 'declined' || finalStatus === 'failed') {
       const prevStatus = (updatedCall as any).prev_status as string;
       if (prevStatus === 'ringing' || prevStatus === 'initiated') {
         // The party who did NOT end the call needs the push

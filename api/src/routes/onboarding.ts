@@ -20,7 +20,7 @@ import {
   fetchAadhaar,
   DigilockerError,
 } from '../services/digilocker';
-import { isLivenessConfigured, checkLiveness, livenessThreshold, compareFaces, faceMatchThreshold } from '../services/liveness';
+import { isLivenessConfigured, isLivenessAvailable, checkLiveness, livenessThreshold, compareFaces, faceMatchThreshold } from '../services/liveness';
 import { recomputeAndPersist } from '../services/trustScore';
 import { buildHandleCandidates } from '../utils/handles';
 import { assertCanAuthenticate, getLatestAppeal } from '../services/accountState';
@@ -365,7 +365,7 @@ onboardingRouter.post('/liveness/init', async (req: Request, res: Response, next
     if (!session.identity_id || !session.legal_name) {
       throw new AppError(409, 'IDENTITY_NOT_VERIFIED', 'Verify your identity before the face check.');
     }
-    if (!isLivenessConfigured()) {
+    if (!isLivenessAvailable()) {
       throw new AppError(503, 'LIVENESS_UNAVAILABLE', 'Liveness verification is not available right now. Please try again later.');
     }
     const providerRef = crypto.randomUUID();
@@ -400,7 +400,7 @@ onboardingRouter.post('/liveness/complete', async (req: Request, res: Response, 
     if (!session.liveness_provider_ref || session.liveness_provider_ref !== body.provider_ref) {
       throw new AppError(404, 'LIVENESS_SESSION_NOT_FOUND', 'Face check session not found.');
     }
-    if (!isLivenessConfigured()) {
+    if (!isLivenessAvailable()) {
       throw new AppError(503, 'LIVENESS_UNAVAILABLE', 'Liveness verification is not available right now. Please try again later.');
     }
 

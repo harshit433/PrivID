@@ -15,6 +15,24 @@ export function isLivenessConfigured(): boolean {
 }
 
 /**
+ * Dev/testing mock for the face checks (liveness + doc-match). Active when
+ * MOCK_LIVENESS=true, or automatically when Luxand is not configured and we're
+ * not in production (mirrors the KYC and telephony mocks). Set MOCK_LIVENESS=false
+ * to force the real provider in dev.
+ */
+export function isMockLiveness(): boolean {
+  const flag = process.env.MOCK_LIVENESS?.trim().toLowerCase();
+  if (flag === 'true' || flag === '1') return true;
+  if (flag === 'false' || flag === '0') return false;
+  return !isLivenessConfigured() && process.env.NODE_ENV !== 'production';
+}
+
+/** True when a face check can run at all — real provider or dev mock. */
+export function isLivenessAvailable(): boolean {
+  return isLivenessConfigured() || isMockLiveness();
+}
+
+/**
  * Pass threshold as a 0–1 probability. Accepts LIVENESS_CONFIDENCE_THRESHOLD as
  * either a 0–1 value (e.g. 0.7) or a 0–100 percentage (e.g. 70) for convenience.
  */
@@ -36,6 +54,9 @@ export interface LivenessResult {
  * { result: 'real' | 'fake' } shape — we handle both.
  */
 export async function checkLiveness(image: Buffer): Promise<LivenessResult> {
+  if (isMockLiveness()) {
+    return { real: true, score: 0.99, raw: { mock: true } };
+  }
   const token = process.env.LUXAND_API_TOKEN!.trim();
 
   const form = new FormData();
@@ -91,6 +112,9 @@ const LUXAND_SIMILARITY_URL = 'https://api.luxand.cloud/photo/similarity';
 
 /** Compare DigiLocker / KYC photo to the live selfie (Luxand similarity). */
 export async function compareFaces(docPhoto: Buffer, selfie: Buffer): Promise<FaceMatchResult> {
+  if (isMockLiveness()) {
+    return { matched: true, score: 0.99, raw: { mock: true } };
+  }
   const token = process.env.LUXAND_API_TOKEN!.trim();
   const form = new FormData();
   form.append('photo1', new Blob([new Uint8Array(docPhoto)], { type: 'image/jpeg' }), 'doc.jpg');

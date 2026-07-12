@@ -51,8 +51,8 @@ import { requestIdMiddleware } from './middleware/requestId';
 import { apiLimiter, publicLimiter } from './middleware/rateLimit';
 import { getPool, connectRedis, getRedis } from '@trustroute/shared';
 import { isStreamConfigured } from './services/stream';
-import { isLivenessConfigured } from './services/liveness';
-import { isDigilockerConfigured } from './services/digilocker';
+import { isLivenessConfigured, isMockLiveness } from './services/liveness';
+import { isDigilockerConfigured, isMockKyc } from './services/digilocker';
 import { digilockerCallbackRouter } from './routes/digilockerCallback';
 import { logger } from './utils/logger';
 
@@ -129,7 +129,11 @@ app.get('/health', async (_req, res) => {
       redis_ok,
       stream_chat_configured: isStreamConfigured(),
       liveness_configured: isLivenessConfigured(),
+      liveness_mock: isMockLiveness(),
       digilocker_configured: isDigilockerConfigured(),
+      kyc_mock: isMockKyc(),
+      telephony_mock: (process.env.TELEPHONY_PROVIDER ?? '').toLowerCase() !== 'exotel'
+        && ((process.env.TELEPHONY_PROVIDER ?? '').toLowerCase() === 'mock' || process.env.NODE_ENV !== 'production'),
     });
   } catch (err) {
     res.status(503).json({ ok: false, error: 'DB unavailable' });

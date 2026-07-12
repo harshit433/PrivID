@@ -2,7 +2,7 @@ app = "trustroute-setu-proxy"
 primary_region = "bom"
 
 [build]
-  builtin = "node"
+  dockerfile = "Dockerfile"
 
 [http_service]
   internal_port = 8080
@@ -10,6 +10,7 @@ primary_region = "bom"
   auto_stop_machines = "stop"
   auto_start_machines = true
   min_machines_running = 1
+  processes = ["app"]
 
 [[vm]]
   memory = "256mb"

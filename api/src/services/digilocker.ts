@@ -1,5 +1,5 @@
 import { execFile } from 'child_process';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { promisify } from 'util';
 import { logger } from '../utils/logger';
 
@@ -103,6 +103,54 @@ function getConfig(): DgConfig {
   };
 }
 
+/**
+ * Dev/testing mock. Active when MOCK_KYC=true, or automatically when Setu is
+ * not configured and we're not in production (mirrors the telephony mock). Lets
+ * the whole onboarding/KYC flow run end-to-end with no real Setu/DigiLocker.
+ * Set MOCK_KYC=false to force the real client even in dev.
+ */
+export function isMockKyc(): boolean {
+  const flag = process.env.MOCK_KYC?.trim().toLowerCase();
+  if (flag === 'true' || flag === '1') return true;
+  if (flag === 'false' || flag === '0') return false;
+  return !isDigilockerConfigured() && process.env.NODE_ENV !== 'production';
+}
+
+/**
+ * The URL the mobile WebView opens for "consent". We point it straight at the
+ * existing success callback so the app's redirect detection fires immediately
+ * and no separate hosted page is needed. Falls back to the app deep-link if no
+ * public API base is known.
+ */
+function mockAuthUrl(id: string): string {
+  const base = (process.env.API_BASE_URL || '').replace(/\/+$/, '');
+  if (base) return `${base}/digilocker/callback?success=true&id=${encodeURIComponent(id)}`;
+  return `trustroute://digilocker/done?success=true&id=${encodeURIComponent(id)}`;
+}
+
+/**
+ * Deterministic mock Aadhaar. By default each new request yields a fresh
+ * identity (unique docHash) so you can spin up many test accounts. Set
+ * MOCK_KYC_AADHAAR to a fixed seed to always resolve to one stable identity
+ * (useful for testing dedup / "already have an account"); MOCK_KYC_NAME overrides
+ * the legal name.
+ */
+function mockAadhaar(id: string): DigilockerAadhaar {
+  const seed = process.env.MOCK_KYC_AADHAAR?.trim() || id;
+  const h = createHash('sha256').update(`mock-kyc|${seed}`).digest('hex');
+  const legalName = process.env.MOCK_KYC_NAME?.trim() || `Test User ${h.slice(0, 4).toUpperCase()}`;
+  const last4 = (parseInt(h.slice(0, 6), 16) % 10000).toString().padStart(4, '0');
+  return {
+    legalName,
+    dob: '1995-01-01',
+    gender: 'M',
+    address: 'Mock Address, Bengaluru, Karnataka, India',
+    maskedNumber: `XXXXXXXX${last4}`,
+    photoBase64: undefined,
+    docHash: h,
+  };
+}
+
 async function setuRequest<T>(
   cfg: DgConfig,
   method: 'GET' | 'POST',
@@ -203,6 +251,11 @@ async function setuRequest<T>(
 }
 
 export async function createDigilockerRequest(): Promise<DigilockerRequest> {
+  if (isMockKyc()) {
+    const id = `mockdg_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+    logger.warn(JOB, 'DigiLocker MOCK request created (dev — no real Setu)', { requestId: id });
+    return { id, url: mockAuthUrl(id), status: 'unauthenticated' };
+  }
   const cfg = getConfig();
   try {
     const data = await setuRequest<{ id: string; url: string; status: string; validUpto?: string }>(
@@ -228,6 +281,7 @@ export async function createDigilockerRequest(): Promise<DigilockerRequest> {
 }
 
 export async function getDigilockerStatus(id: string): Promise<DigilockerStatus> {
+  if (isMockKyc()) return 'authenticated';
   const cfg = getConfig();
   try {
     const data = await setuRequest<{ status?: string }>(
@@ -243,6 +297,11 @@ export async function getDigilockerStatus(id: string): Promise<DigilockerStatus>
 }
 
 export async function fetchAadhaar(id: string): Promise<DigilockerAadhaar> {
+  if (isMockKyc()) {
+    const a = mockAadhaar(id);
+    logger.warn(JOB, 'DigiLocker MOCK Aadhaar returned (dev — no real Setu)', { requestId: id, legalName: a.legalName });
+    return a;
+  }
   const cfg = getConfig();
   try {
     const data = await setuRequest<{ aadhaar?: Record<string, unknown> } & Record<string, unknown>>(

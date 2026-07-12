@@ -11,17 +11,22 @@ export const digilockerCallbackRouter = Router();
 digilockerCallbackRouter.get('/callback', (req: Request, res: Response) => {
   const successRaw = String(req.query.success ?? '').toLowerCase();
   const ok = successRaw === 'true' || successRaw === '1';
+  const failed = successRaw === 'false' || successRaw === '0';
   const id = typeof req.query.id === 'string' ? req.query.id : '';
   const errCode = typeof req.query.errCode === 'string' ? req.query.errCode : '';
   const errMessage = typeof req.query.errMessage === 'string' ? req.query.errMessage : '';
+  // Setu may omit success while still returning id — treat as success for the app.
+  const succeeded = ok || (!failed && !!id);
 
-  const title = ok ? 'Verification complete' : 'Verification didn’t finish';
-  const body = ok
-    ? 'Return to TrustRoute to finish setup. You can close this window.'
-    : errMessage ||
-      'DigiLocker consent was cancelled or failed. Go back to TrustRoute and try again.';
+  const title = failed ? "Verification didn’t finish" : succeeded ? 'Verification complete' : 'Finishing verification…';
+  const body = failed
+    ? errMessage ||
+      'DigiLocker consent was cancelled or failed. Go back to TrustRoute and try again.'
+    : succeeded
+      ? 'Return to TrustRoute to finish setup. You can close this window.'
+      : 'Return to TrustRoute — we’re confirming your DigiLocker consent.';
   const deep =
-    `trustroute://digilocker/done?success=${encodeURIComponent(ok ? 'true' : 'false')}` +
+    `trustroute://digilocker/done?success=${encodeURIComponent(failed ? 'false' : 'true')}` +
     (id ? `&id=${encodeURIComponent(id)}` : '');
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -46,7 +51,7 @@ digilockerCallbackRouter.get('/callback', (req: Request, res: Response) => {
   .fail a{background:#111827}
 </style>
 </head>
-<body class="${ok ? '' : 'fail'}">
+<body class="${failed ? 'fail' : ''}">
   <div class="card">
     <div class="brand">TrustRoute</div>
     <h1>${escapeHtml(title)}</h1>
@@ -55,9 +60,9 @@ digilockerCallbackRouter.get('/callback', (req: Request, res: Response) => {
   </div>
   <script>
     (function(){
-      var payload={type:'digilocker_callback',success:${ok ? 'true' : 'false'},id:${JSON.stringify(id || null)},errCode:${JSON.stringify(errCode || null)},errMessage:${JSON.stringify(errMessage || null)}};
+      var payload={type:'digilocker_callback',success:${failed ? 'false' : 'true'},id:${JSON.stringify(id || null)},errCode:${JSON.stringify(errCode || null)},errMessage:${JSON.stringify(errMessage || null)}};
       try{if(window.ReactNativeWebView&&window.ReactNativeWebView.postMessage){window.ReactNativeWebView.postMessage(JSON.stringify(payload));}}catch(e){}
-      ${ok ? `setTimeout(function(){try{location.href=${JSON.stringify(deep)};}catch(e){}},400);` : ''}
+      ${!failed ? `setTimeout(function(){try{location.href=${JSON.stringify(deep)};}catch(e){}},400);` : ''}
     })();
   </script>
 </body>

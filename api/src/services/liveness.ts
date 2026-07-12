@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { logger } from '../utils/logger';
 
 // ─── Managed passive liveness (Luxand.cloud) ─────────────────────────────────
 // The client captures a single selfie frame and uploads it; we forward the image
@@ -144,5 +145,9 @@ export async function compareFaces(docPhoto: Buffer, selfie: Buffer): Promise<Fa
   else if (typeof data?.probability === 'number') score = data.probability;
   if (score > 1) score = score / 100;
 
-  return { matched: score >= faceMatchThreshold(), score, raw: data };
+  const threshold = faceMatchThreshold();
+  const matched = score >= threshold;
+  logger.info('liveness', 'Face similarity', { score, threshold, matched });
+
+  return { matched, score, raw: data };
 }

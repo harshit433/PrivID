@@ -9,8 +9,62 @@ import type { RefreshTokenRow, UserRow } from '@trustroute/shared';
 import { AppError } from '../middleware/errorHandler';
 import { requireAuth } from '../middleware/auth';
 import { assertCanAuthenticate } from '../services/accountState';
+import { publicLimiter } from '../middleware/rateLimit';
+import {
+  assertPinNotLocked,
+  clearPinFailures,
+  getUserByHandleForLogin,
+  isValidPin,
+  pinSet,
+  recordPinFailure,
+  setUserPin,
+  verifyPin,
+  type UserWithPin,
+} from '../services/accountPin';
 
 export const authRouter = Router();
+
+const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+function authUserPayload(user: UserRow): object {
+  return {
+    user_id: user.user_id,
+    identity_id: user.identity_id,
+    handle: user.handle,
+    display_name: user.display_name,
+    legal_name: user.legal_name,
+    trust_tier: user.trust_tier,
+    trust_score: user.trust_score,
+    avatar_url: user.avatar_url,
+    onboarding_complete: user.onboarding_complete ?? false,
+    discovery_mode: user.discovery_mode,
+    account_status: user.account_status,
+    phone_e164: user.phone_e164,
+    phone_verified: Boolean(user.phone_e164),
+    pin_set: pinSet(user),
+  };
+}
+
+async function issueLoginResponse(user: UserRow, revokeExisting = true): Promise<object> {
+  const { accessToken, refreshToken } = issueTokens(user);
+  await withTransaction(async (client) => {
+    if (revokeExisting) {
+      await client.query(`UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1`, [user.user_id]);
+    }
+    await client.query(
+      `INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
+      [user.user_id, hashToken(refreshToken), new Date(Date.now() + REFRESH_TOKEN_TTL_MS)],
+    );
+  });
+  return {
+    ok: true,
+    data: {
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      user: authUserPayload(user),
+    },
+  };
+}
 
 const removedAuthRoutes = new Set([
   'POST /register/initiate',
@@ -64,6 +118,133 @@ function issueTokens(user: UserRow): { accessToken: string; refreshToken: string
   );
   return { accessToken, refreshToken: crypto.randomBytes(40).toString('base64url') };
 }
+
+// ─── POST /auth/login (handle + PIN) ─────────────────────────────────────────
+
+const loginSchema = z.object({
+  handle: z.string().min(1).max(40),
+  pin: z.string().length(6),
+});
+
+authRouter.post('/login', publicLimiter, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = loginSchema.parse(req.body ?? {});
+    if (!isValidPin(body.pin)) {
+      throw new AppError(400, 'PIN_INVALID', 'PIN must be exactly 6 digits.');
+    }
+
+    const user = await getUserByHandleForLogin(body.handle);
+    // Same generic message whether handle is missing or PIN is wrong (avoid handle enumeration).
+    const invalidCreds = () =>
+      new AppError(401, 'INVALID_CREDENTIALS', 'Handle or PIN is incorrect.');
+
+    if (!user) throw invalidCreds();
+    assertCanAuthenticate(user);
+
+    if (!user.pin_hash) {
+      throw new AppError(
+        403,
+        'PIN_NOT_SET',
+        'No login PIN on this account yet. Verify with DigiLocker to set one.',
+      );
+    }
+
+    // Incomplete signup can still sign in with PIN to finish Setup Complete on this device.
+    assertPinNotLocked(user);
+
+    const ok = await verifyPin(body.pin, user.pin_hash);
+    if (!ok) {
+      await recordPinFailure(user.user_id);
+      throw invalidCreds();
+    }
+
+    await clearPinFailures(user.user_id);
+    const fresh = await queryOne<UserRow>(`SELECT * FROM users WHERE user_id = $1`, [user.user_id]);
+    res.json(await issueLoginResponse(fresh ?? user, true));
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
+// ─── POST /auth/pin/set ───────────────────────────────────────────────────────
+
+const setPinSchema = z.object({
+  pin: z.string().length(6),
+  confirm_pin: z.string().length(6).optional(),
+});
+
+authRouter.post('/pin/set', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = setPinSchema.parse(req.body ?? {});
+    if (body.confirm_pin != null && body.confirm_pin !== body.pin) {
+      throw new AppError(400, 'PIN_MISMATCH', 'PIN confirmation does not match.');
+    }
+    if (!isValidPin(body.pin)) {
+      throw new AppError(400, 'PIN_INVALID', 'PIN must be exactly 6 digits.');
+    }
+
+    const user = await queryOne<UserWithPin>(`SELECT * FROM users WHERE user_id = $1`, [req.user!.sub]);
+    if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'Account not found.');
+    assertCanAuthenticate(user);
+
+    if (!user.identity_id || user.kyc_status !== 'verified') {
+      throw new AppError(403, 'IDENTITY_REQUIRED', 'Verify your identity before setting a PIN.');
+    }
+
+    await setUserPin(user.user_id, body.pin);
+    res.json({ ok: true, data: { pin_set: true } });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
+// ─── POST /auth/pin/change (requires current PIN) ─────────────────────────────
+
+const changePinSchema = z.object({
+  current_pin: z.string().length(6),
+  pin: z.string().length(6),
+  confirm_pin: z.string().length(6).optional(),
+});
+
+authRouter.post('/pin/change', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = changePinSchema.parse(req.body ?? {});
+    if (body.confirm_pin != null && body.confirm_pin !== body.pin) {
+      throw new AppError(400, 'PIN_MISMATCH', 'PIN confirmation does not match.');
+    }
+    if (!isValidPin(body.current_pin) || !isValidPin(body.pin)) {
+      throw new AppError(400, 'PIN_INVALID', 'PIN must be exactly 6 digits.');
+    }
+    if (body.current_pin === body.pin) {
+      throw new AppError(400, 'PIN_UNCHANGED', 'New PIN must be different from your current PIN.');
+    }
+
+    const user = await queryOne<UserWithPin>(`SELECT * FROM users WHERE user_id = $1`, [req.user!.sub]);
+    if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'Account not found.');
+    assertCanAuthenticate(user);
+
+    if (!user.pin_hash) {
+      throw new AppError(403, 'PIN_NOT_SET', 'No login PIN on this account yet.');
+    }
+
+    assertPinNotLocked(user);
+
+    const ok = await verifyPin(body.current_pin, user.pin_hash);
+    if (!ok) {
+      await recordPinFailure(user.user_id);
+      throw new AppError(401, 'INVALID_CREDENTIALS', 'Current PIN is incorrect.');
+    }
+
+    await clearPinFailures(user.user_id);
+    await setUserPin(user.user_id, body.pin);
+    res.json({ ok: true, data: { pin_set: true } });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
 
 // ─── POST /auth/token/refresh ─────────────────────────────────────────────────
 

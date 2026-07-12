@@ -131,11 +131,11 @@ export async function listConversations(userId: string): Promise<ConversationLis
     [userId],
   );
 
-  const connRows = await query<{ user_id: string; connection_type: ConnectionType }>(
-    `SELECT user_id, connection_type FROM connections WHERE owner_id = $1`,
+  const connRows = await query<{ contact_id: string; connection_type: ConnectionType }>(
+    `SELECT contact_id, connection_type FROM connections WHERE owner_id = $1`,
     [userId],
   );
-  const connMap = new Map(connRows.map((r) => [r.user_id, r.connection_type]));
+  const connMap = new Map(connRows.map((r) => [r.contact_id, r.connection_type]));
 
   return rows.map((r) => {
     const lastSeq = parseInt(r.last_seq, 10);

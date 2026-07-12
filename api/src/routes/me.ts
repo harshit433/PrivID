@@ -37,13 +37,14 @@ const optionalText = (max: number) =>
 
 meRouter.get('/', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const user = await queryOne<UserRow>(
+    const user = await queryOne<UserRow & { pin_set: boolean }>(
       `SELECT user_id, handle, display_name, avatar_url, trust_tier, trust_score,
               identity_id, account_status, legal_name, phone_e164, email, profession, bio,
               business_info, organisation, address, language_pref,
               onboarding_complete, discovery_mode, discovery_contact_book_matching,
               discovery_show_trust_score, shadow_trust_enabled, handle_changed_at,
-              is_under_review, review_reason, created_at
+              is_under_review, review_reason, created_at,
+              (pin_hash IS NOT NULL) AS pin_set
        FROM users WHERE user_id = $1`,
       [req.user!.sub],
     );
@@ -54,11 +55,43 @@ meRouter.get('/', requireAuth, async (req: Request, res: Response, next: NextFun
       [user.user_id],
     );
 
+    // Heal false-positive auto-reviews: KYC-verified accounts with a healthy score
+    // should not stay stuck in under_review from cold-start ML flips.
+    let accountStatus = user.account_status;
+    let underReview = user.is_under_review;
+    const completed = new Set(
+      factors.filter((f) => f.status === 'completed').map((f) => f.factor_type as string),
+    );
+    if (
+      (accountStatus === 'under_review' || underReview) &&
+      completed.has('govt_id_verified') &&
+      completed.has('liveness_check') &&
+      (user.trust_score ?? 0) >= 30
+    ) {
+      await query(
+        `UPDATE users
+            SET account_status = 'active',
+                is_under_review = FALSE,
+                review_reason = NULL,
+                review_started_at = NULL,
+                account_status_reason = NULL,
+                account_status_updated_at = NOW(),
+                updated_at = NOW()
+          WHERE user_id = $1
+            AND (account_status = 'under_review' OR is_under_review = TRUE)`,
+        [user.user_id],
+      );
+      accountStatus = 'active';
+      underReview = false;
+    }
+
     res.json({
       ok: true,
       data: {
         ...user,
-        verified_factors: factors.filter((f) => f.status === 'completed').map((f) => f.factor_type),
+        account_status: accountStatus,
+        is_under_review: underReview,
+        verified_factors: [...completed],
       },
     });
   } catch (err) {
@@ -119,6 +152,10 @@ meRouter.patch('/', requireAuth, async (req: Request, res: Response, next: NextF
                  shadow_trust_enabled`,
       params,
     );
+
+    if (body.display_name !== undefined || body.avatar_url !== undefined) {
+      await finalizeTrustFactor(req.user!.sub, 'profile_update').catch(() => {});
+    }
 
     res.json({ ok: true, data: user });
   } catch (err) {
@@ -309,11 +346,18 @@ meRouter.get('/trust', requireAuth, async (req: Request, res: Response, next: Ne
       ),
     ]);
 
-    const tips = [
-      'Complete your profile with a photo and bio.',
-      'Add trusted contacts who know you.',
-      'Keep healthy call patterns — avoid spam-like behaviour.',
-    ];
+    const tips: string[] = [];
+    const f = snapshot.factors;
+    if (f.profile_complete <= 0) tips.push('Add a profile photo and display name (+5 pts).');
+    if (f.phone_verified <= 0) tips.push('Optionally link a phone number in Settings (+15 pts).');
+    if (f.device_integrity <= 0) tips.push('Complete device verification (+10 pts).');
+    if (f.govt_id_verified <= 0) tips.push('Verify your government ID via DigiLocker (+30 pts).');
+    if (f.liveness_check <= 0) tips.push('Complete the face check (+25 pts).');
+    if (tips.length === 0) {
+      tips.push('Keep healthy call patterns — avoid spam-like behaviour.');
+      tips.push('Add trusted contacts who know you.');
+      tips.push('Account age and network trust grow automatically as you use TrustRoute.');
+    }
 
     res.json({
       ok: true,

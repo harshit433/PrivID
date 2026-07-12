@@ -20,16 +20,27 @@ import {
   fetchAadhaar,
   DigilockerError,
 } from '../services/digilocker';
-import { isLivenessConfigured, isLivenessAvailable, checkLiveness, livenessThreshold, compareFaces, faceMatchThreshold } from '../services/liveness';
+import { isLivenessAvailable, checkLiveness, livenessThreshold } from '../services/liveness';
 import { recomputeAndPersist } from '../services/trustScore';
 import { buildHandleCandidates } from '../utils/handles';
 import { assertCanAuthenticate, getLatestAppeal } from '../services/accountState';
 import { logger } from '../utils/logger';
 import { applyReferralOnOnboardingComplete, ensureReferralCode } from '../services/referrals';
+import {
+  canCompleteLiveness,
+  canStartDigilocker,
+  canStartLiveness,
+  computeNextStep,
+} from '../services/onboardingProgress';
 
 export const onboardingRouter = Router();
 
-const SESSION_TTL_MS = 20 * 60 * 1000;
+/** Long enough to resume mid-flow after app kill; bumped again on each step. */
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+
+function sessionExpiry(): Date {
+  return new Date(Date.now() + SESSION_TTL_MS);
+}
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 let _privateKey: string | null = null;
@@ -104,6 +115,7 @@ function authUserPayload(user: UserRow): object {
     account_status: user.account_status,
     phone_e164: user.phone_e164,
     phone_verified: Boolean(user.phone_e164),
+    pin_set: Boolean(user.pin_hash),
   };
 }
 
@@ -194,11 +206,13 @@ async function buildStatusPayload(session: OnboardingSessionRow): Promise<object
     session_id: session.session_id,
     purpose: session.purpose,
     status: session.status,
+    next_step: computeNextStep(session),
     branch: session.branch,
     identity_id: session.identity_id,
     matched_user_id: session.matched_user_id,
     legal_name: session.legal_name,
     selected_handle: session.selected_handle,
+    pending_display_name: session.pending_display_name,
     last_handle: lastHandle,
     expires_at: new Date(session.expires_at).toISOString(),
     appeal,
@@ -208,7 +222,7 @@ async function buildStatusPayload(session: OnboardingSessionRow): Promise<object
 // ─── POST /onboarding/start ──────────────────────────────────────────────────
 
 const startSchema = z.object({
-  purpose: z.enum(['signup', 'recovery']).default('signup'),
+  purpose: z.enum(['signup', 'recovery', 'pin_reset']).default('signup'),
   device_fingerprint: z.string().max(500).optional(),
   integrity_verdict: z.record(z.unknown()).optional(),
 });
@@ -226,7 +240,7 @@ onboardingRouter.post('/start', async (req: Request, res: Response, next: NextFu
         body.purpose,
         fingerprintHash,
         JSON.stringify(body.integrity_verdict ?? {}),
-        new Date(Date.now() + SESSION_TTL_MS),
+        sessionExpiry(),
       ],
     );
 
@@ -257,6 +271,20 @@ onboardingRouter.post('/start', async (req: Request, res: Response, next: NextFu
   }
 });
 
+// ─── GET /onboarding/session ─────────────────────────────────────────────────
+/** Resume checkpoint — returns status + exact next_step for client routing. */
+
+onboardingRouter.get('/session', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const session_id = z.string().uuid().parse(req.query.session_id);
+    const session = await getSession(session_id);
+    res.json({ ok: true, data: await buildStatusPayload(session) });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
 // ─── POST /onboarding/digilocker/init ────────────────────────────────────────
 
 const sessionSchema = z.object({ session_id: z.string().uuid() });
@@ -264,16 +292,25 @@ const sessionSchema = z.object({ session_id: z.string().uuid() });
 onboardingRouter.post('/digilocker/init', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { session_id } = sessionSchema.parse(req.body);
-    await getSession(session_id);
+    const existing = await getSession(session_id);
+    if (!canStartDigilocker(existing.status)) {
+      throw new AppError(
+        409,
+        'STEP_PASSED',
+        'DigiLocker is already done for this session. Continue from the next step.',
+        { next_step: computeNextStep(existing), status: existing.status },
+      );
+    }
     const dg = await createDigilockerRequest();
     const [session] = await query<OnboardingSessionRow>(
       `UPDATE onboarding_sessions
           SET status = 'digilocker_started',
               digilocker_provider_ref = $2,
+              expires_at = $3,
               updated_at = NOW()
         WHERE session_id = $1
         RETURNING *`,
-      [session_id, dg.id],
+      [session_id, dg.id, sessionExpiry()],
     );
     res.json({ ok: true, data: { ...(await buildStatusPayload(session)), auth_url: dg.url, provider_ref: dg.id } });
   } catch (err) {
@@ -289,6 +326,18 @@ onboardingRouter.post('/digilocker/complete', async (req: Request, res: Response
   try {
     const { session_id } = sessionSchema.parse(req.body);
     const existingSession = await getSession(session_id);
+    if (
+      existingSession.status === 'digilocker_verified' ||
+      existingSession.status === 'liveness_started' ||
+      existingSession.status === 'liveness_verified' ||
+      existingSession.status === 'matched' ||
+      existingSession.status === 'completed'
+    ) {
+      return res.json({
+        ok: true,
+        data: { ...(await buildStatusPayload(existingSession)), pending: false },
+      });
+    }
     const providerRef = existingSession.digilocker_provider_ref;
     if (!providerRef) throw new AppError(409, 'DIGILOCKER_NOT_STARTED', 'Start DigiLocker verification first.');
 
@@ -332,6 +381,7 @@ onboardingRouter.post('/digilocker/complete', async (req: Request, res: Response
                 matched_user_id = $5,
                 branch = $6,
                 doc_photo_b64 = COALESCE($7, doc_photo_b64),
+                expires_at = $8,
                 updated_at = NOW()
           WHERE session_id = $1
           RETURNING *`,
@@ -343,6 +393,7 @@ onboardingRouter.post('/digilocker/complete', async (req: Request, res: Response
           matchedUserId,
           branch,
           aadhaar.photoBase64 ?? null,
+          sessionExpiry(),
         ],
       );
       return updated.rows;
@@ -365,6 +416,18 @@ onboardingRouter.post('/liveness/init', async (req: Request, res: Response, next
     if (!session.identity_id || !session.legal_name) {
       throw new AppError(409, 'IDENTITY_NOT_VERIFIED', 'Verify your identity before the face check.');
     }
+    if (!canStartLiveness(session.status)) {
+      throw new AppError(
+        409,
+        session.status === 'digilocker_started' || session.status === 'device_checked' || session.status === 'started'
+          ? 'DIGILOCKER_REQUIRED'
+          : 'STEP_PASSED',
+        session.status === 'digilocker_started' || session.status === 'device_checked' || session.status === 'started'
+          ? 'Finish DigiLocker before the face check.'
+          : 'Face check is already done. Continue from the next step.',
+        { next_step: computeNextStep(session), status: session.status },
+      );
+    }
     if (!isLivenessAvailable()) {
       throw new AppError(503, 'LIVENESS_UNAVAILABLE', 'Liveness verification is not available right now. Please try again later.');
     }
@@ -373,10 +436,11 @@ onboardingRouter.post('/liveness/init', async (req: Request, res: Response, next
       `UPDATE onboarding_sessions
           SET status = 'liveness_started',
               liveness_provider_ref = $2,
+              expires_at = $3,
               updated_at = NOW()
         WHERE session_id = $1
         RETURNING *`,
-      [session_id, providerRef],
+      [session_id, providerRef, sessionExpiry()],
     );
     res.json({ ok: true, data: { ...(await buildStatusPayload(updated)), provider_ref: providerRef, liveness_enabled: true } });
   } catch (err) {
@@ -397,6 +461,14 @@ onboardingRouter.post('/liveness/complete', async (req: Request, res: Response, 
   try {
     const body = livenessCompleteSchema.parse(req.body);
     const session = await getSession(body.session_id);
+    if (!canCompleteLiveness(session.status)) {
+      throw new AppError(
+        409,
+        'LIVENESS_REQUIRED',
+        'Start the face check before submitting a selfie.',
+        { next_step: computeNextStep(session), status: session.status },
+      );
+    }
     if (!session.liveness_provider_ref || session.liveness_provider_ref !== body.provider_ref) {
       throw new AppError(404, 'LIVENESS_SESSION_NOT_FOUND', 'Face check session not found.');
     }
@@ -421,14 +493,32 @@ onboardingRouter.post('/liveness/complete', async (req: Request, res: Response, 
       );
     }
 
+    // Face-to-document match was removed — after liveness we only resolve identity/account branch.
+    const identity = await queryOne<IdentityRow>(
+      `SELECT * FROM identities WHERE identity_id = $1`,
+      [session.identity_id],
+    );
+    const linkedUser = session.matched_user_id
+      ? await queryOne<Pick<UserRow, 'user_id' | 'account_status'>>(
+          `SELECT user_id, account_status FROM users WHERE user_id = $1`,
+          [session.matched_user_id],
+        )
+      : null;
+    const branch = branchForIdentity(identity, linkedUser);
+    const matchedUserId = identity?.current_user_id ?? session.matched_user_id ?? null;
+
     const [updated] = await query<OnboardingSessionRow>(
       `UPDATE onboarding_sessions
-          SET status = 'liveness_verified',
-              selfie_b64 = $2,
+          SET status = 'matched',
+              branch = $2,
+              matched_user_id = COALESCE($3, matched_user_id),
+              selfie_b64 = $4,
+              doc_photo_b64 = NULL,
+              expires_at = $5,
               updated_at = NOW()
         WHERE session_id = $1
         RETURNING *`,
-      [body.session_id, b64],
+      [body.session_id, branch, matchedUserId, b64, sessionExpiry()],
     );
 
     res.json({
@@ -445,48 +535,22 @@ onboardingRouter.post('/liveness/complete', async (req: Request, res: Response, 
 });
 
 // ─── POST /onboarding/match ───────────────────────────────────────────────────
-// ON-12 · Face-match + dedup after liveness — sets status to matched.
+// Kept for older clients / resume of sessions left at liveness_verified.
+// No face-to-document compare — identity/account dedup only.
 
 onboardingRouter.post('/match', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { session_id } = sessionSchema.parse(req.body);
     const session = await getSession(session_id);
     if (!session.identity_id || !session.legal_name) {
-      throw new AppError(409, 'IDENTITY_NOT_VERIFIED', 'Verify with DigiLocker before matching.');
+      throw new AppError(409, 'IDENTITY_NOT_VERIFIED', 'Verify with DigiLocker before continuing.');
     }
-    if (session.status !== 'liveness_verified' && session.status !== 'matched') {
-      throw new AppError(409, 'LIVENESS_REQUIRED', 'Complete the face check before matching.');
-    }
-
-    // Face-to-document match when both photos are available.
-    const docB64 = session.doc_photo_b64;
-    const selfieB64 = session.selfie_b64;
-    if (docB64 && selfieB64 && isLivenessConfigured()) {
-      const docBuf = Buffer.from(docB64.includes(',') ? docB64.slice(docB64.indexOf(',') + 1) : docB64, 'base64');
-      const selfieBuf = Buffer.from(selfieB64.includes(',') ? selfieB64.slice(selfieB64.indexOf(',') + 1) : selfieB64, 'base64');
-      const match = await compareFaces(docBuf, selfieBuf).catch((err: Error) => {
-        logger.error('onboarding/match', 'Face match provider failed', { error: err.message });
-        throw new AppError(502, 'FACE_MATCH_FAILED', 'Face matching is temporarily unavailable. Please try again.');
-      });
-      if (!match.matched) {
-        throw new AppError(
-          400,
-          'FACE_MISMATCH',
-          `Your face didn't match your document. Please retry in better lighting.`,
-        );
-      }
-    } else if (process.env.NODE_ENV === 'production' && process.env.ALLOW_SKIP_FACE_MATCH !== 'true') {
-      // DigiLocker didn't return a photo — fail closed in prod unless explicitly allowed.
-      if (!docB64) {
-        throw new AppError(
-          503,
-          'FACE_MATCH_UNAVAILABLE',
-          'We could not verify your face against your document right now. Please try again later.',
-        );
-      }
-      if (!selfieB64) {
-        throw new AppError(409, 'LIVENESS_REQUIRED', 'Complete the face check before matching.');
-      }
+    if (
+      session.status !== 'liveness_verified' &&
+      session.status !== 'matched' &&
+      session.status !== 'liveness_started'
+    ) {
+      throw new AppError(409, 'LIVENESS_REQUIRED', 'Complete the face check before continuing.');
     }
 
     const identity = await queryOne<IdentityRow>(
@@ -509,18 +573,16 @@ onboardingRouter.post('/match', async (req: Request, res: Response, next: NextFu
               matched_user_id = COALESCE($3, matched_user_id),
               doc_photo_b64 = NULL,
               selfie_b64 = NULL,
+              expires_at = $4,
               updated_at = NOW()
         WHERE session_id = $1
         RETURNING *`,
-      [session_id, branch, matchedUserId],
+      [session_id, branch, matchedUserId, sessionExpiry()],
     );
 
     res.json({
       ok: true,
-      data: {
-        ...(await buildStatusPayload(updated)),
-        face_match: { threshold: faceMatchThreshold() },
-      },
+      data: await buildStatusPayload(updated),
     });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
@@ -549,10 +611,11 @@ onboardingRouter.post('/handle', async (req: Request, res: Response, next: NextF
       `UPDATE onboarding_sessions
           SET selected_handle = $2,
               pending_display_name = COALESCE($3, pending_display_name, legal_name),
+              expires_at = $4,
               updated_at = NOW()
         WHERE session_id = $1
         RETURNING *`,
-      [body.session_id, handle, body.display_name?.trim() ?? null],
+      [body.session_id, handle, body.display_name?.trim() ?? null, sessionExpiry()],
     );
     res.json({ ok: true, data: await buildStatusPayload(updated) });
   } catch (err) {
@@ -653,9 +716,14 @@ async function createVerifiedUserFromSession(session: OnboardingSessionRow, hand
       `INSERT INTO trust_factors (user_id, factor_type, status, provider, score_delta, verified_at, is_latest)
        VALUES
          ($1, 'govt_id_verified', 'completed', 'setu', 30, NOW(), TRUE),
-         ($1, 'liveness_check', 'completed', 'onboarding', 25, NOW(), TRUE)
+         ($1, 'liveness_check', 'completed', 'onboarding', 25, NOW(), TRUE),
+         ($1, 'device_integrity', 'completed', 'onboarding', 10, NOW(), TRUE)
        ON CONFLICT (user_id, factor_type) WHERE is_latest = TRUE
-       DO UPDATE SET status = 'completed', verified_at = NOW(), provider = EXCLUDED.provider`,
+       DO UPDATE SET
+         status = 'completed',
+         verified_at = NOW(),
+         provider = EXCLUDED.provider,
+         score_delta = EXCLUDED.score_delta`,
       [user.user_id],
     );
     if (phoneE164) {
@@ -712,8 +780,8 @@ onboardingRouter.post('/complete', async (req: Request, res: Response, next: Nex
     }
 
     if (session.branch === 'active' && session.matched_user_id) {
-      if (session.purpose !== 'recovery') {
-        throw new AppError(409, 'IDENTITY_EXISTS', 'This identity already has a TrustRoute account. Use account recovery to sign in.');
+      if (session.purpose !== 'recovery' && session.purpose !== 'pin_reset') {
+        throw new AppError(409, 'IDENTITY_EXISTS', 'This identity already has a TrustRoute account. Sign in with your handle and PIN.');
       }
       const user = await queryOne<UserRow>(
         `SELECT * FROM users WHERE user_id = $1 AND account_status IN ('active','under_review','restricted')`,
@@ -754,6 +822,9 @@ onboardingRouter.post('/finish', requireAuth, async (req: Request, res: Response
     assertCanAuthenticate(user);
     if (!user.identity_id || user.kyc_status !== 'verified') {
       throw new AppError(403, 'IDENTITY_REQUIRED', 'Government identity verification is required.');
+    }
+    if (!user.pin_hash) {
+      throw new AppError(403, 'PIN_REQUIRED', 'Set a 6-digit login PIN before finishing setup.');
     }
 
     const factors = await query<{ factor_type: string; status: string }>(
@@ -821,6 +892,24 @@ onboardingRouter.post('/appeal', async (req: Request, res: Response, next: NextF
       throw new AppError(400, 'APPEAL_TARGET_MISSING', 'We could not find the account or identity to review.');
     }
 
+    // Healthy / active accounts cannot escalate themselves from the app.
+    // Appeals are for restricted/suspended/banned identities (or website-by-handle).
+    if (userId) {
+      const user = await queryOne<Pick<UserRow, 'account_status'>>(
+        `SELECT account_status FROM users WHERE user_id = $1`,
+        [userId],
+      );
+      const status = user?.account_status ?? 'active';
+      const appealable = ['under_review', 'restricted', 'suspended', 'banned', 'ousted', 'self_deleted'].includes(status);
+      if (!appealable) {
+        throw new AppError(
+          409,
+          'APPEAL_NOT_ALLOWED',
+          'Working accounts cannot request a review from the app. If your account is restricted, use trustroute.live/appeal with your @handle.',
+        );
+      }
+    }
+
     const [appeal] = await query<{
       appeal_id: string;
       status: string;
@@ -837,6 +926,79 @@ onboardingRouter.post('/appeal', async (req: Request, res: Response, next: NextF
         appeal_id: appeal.appeal_id,
         status: appeal.status,
         created_at: new Date(appeal.created_at).toISOString(),
+      },
+    });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
+// ─── POST /onboarding/appeal/public ──────────────────────────────────────────
+// Website-only: appeal by @handle when the account is restricted (no app login required).
+
+const publicAppealSchema = z.object({
+  handle: z.string().min(3).max(30),
+  reason: z.string().min(10).max(2000),
+  evidence: z.string().max(4000).optional(),
+});
+
+onboardingRouter.post('/appeal/public', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = publicAppealSchema.parse(req.body);
+    const handle = body.handle.trim().toLowerCase().replace(/^@/, '');
+    const user = await queryOne<Pick<UserRow, 'user_id' | 'identity_id' | 'account_status' | 'handle'>>(
+      `SELECT user_id, identity_id, account_status, handle FROM users WHERE handle = $1`,
+      [handle],
+    );
+    if (!user) {
+      throw new AppError(404, 'HANDLE_NOT_FOUND', 'No TrustRoute account found for that @handle.');
+    }
+    const appealable = ['under_review', 'restricted', 'suspended', 'banned', 'ousted'].includes(user.account_status);
+    if (!appealable) {
+      throw new AppError(
+        409,
+        'APPEAL_NOT_NEEDED',
+        'This @handle belongs to an active account. There is nothing to appeal. Contact support if you lost access another way.',
+      );
+    }
+
+    const open = await queryOne<{ appeal_id: string }>(
+      `SELECT appeal_id FROM account_appeals
+        WHERE user_id = $1 AND status IN ('submitted','in_review')
+        ORDER BY created_at DESC LIMIT 1`,
+      [user.user_id],
+    );
+    if (open) {
+      return res.json({
+        ok: true,
+        data: {
+          appeal_id: open.appeal_id,
+          status: 'submitted',
+          message: 'An appeal is already on file for this @handle. Our team will review it.',
+        },
+      });
+    }
+
+    const [appeal] = await query<{
+      appeal_id: string;
+      status: string;
+      created_at: Date;
+    }>(
+      `INSERT INTO account_appeals (identity_id, user_id, reason, evidence)
+       VALUES ($1, $2, $3, $4)
+       RETURNING appeal_id, status::text AS status, created_at`,
+      [user.identity_id, user.user_id, body.reason.trim(), body.evidence?.trim() || null],
+    );
+
+    res.status(201).json({
+      ok: true,
+      data: {
+        appeal_id: appeal.appeal_id,
+        status: appeal.status,
+        handle: user.handle,
+        created_at: new Date(appeal.created_at).toISOString(),
+        message: 'Appeal submitted. We typically review within a few business days.',
       },
     });
   } catch (err) {

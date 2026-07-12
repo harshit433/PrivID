@@ -8,7 +8,10 @@ import {
   finalizeTrustFactor,
   getTrustScoreSnapshot,
   warmTrustScoreCache,
+  ensureDeviceIntegrityFactor,
+  recomputeAndPersist,
 } from '../services/trustScore';
+import type { VerificationFactorPoints } from '@trustroute/shared';
 import {
   createDigilockerRequest,
   getDigilockerStatus,
@@ -28,7 +31,10 @@ function friendlyDigilocker(code: string): string {
   return 'We couldn’t verify with DigiLocker. Please try again.';
 }
 
-function getNextTierInfo(score: number): { next_tier: string | null; points_needed: number; actions: string[] } {
+function getNextTierInfo(
+  score: number,
+  factors: VerificationFactorPoints & { ml_modifier?: number },
+): { next_tier: string | null; points_needed: number; actions: string[] } {
   if (score >= 80) return { next_tier: null, points_needed: 0, actions: [] };
 
   const thresholds = [
@@ -43,18 +49,23 @@ function getNextTierInfo(score: number): { next_tier: string | null; points_need
       return {
         next_tier: threshold.tier,
         points_needed: gap,
-        actions: suggestActions(score, gap),
+        actions: suggestActions(factors),
       };
     }
   }
   return { next_tier: null, points_needed: 0, actions: [] };
 }
 
-function suggestActions(score: number, gap: number): string[] {
+function suggestActions(factors: VerificationFactorPoints & { ml_modifier?: number }): string[] {
   const suggestions: string[] = [];
-  if (score < 30 || gap > 20) suggestions.push('Verify your government ID');
-  if (gap > 10) suggestions.push('Complete your profile');
-  if (gap > 25) suggestions.push('Grow trusted connections');
+  if (factors.govt_id_verified <= 0) suggestions.push('Verify your government ID via DigiLocker (+30 pts)');
+  if (factors.device_integrity <= 0) suggestions.push('Complete device verification (+10 pts)');
+  if (factors.liveness_check <= 0) suggestions.push('Complete the face check (+25 pts)');
+  if (factors.profile_complete <= 0) suggestions.push('Add a profile photo and display name (+5 pts)');
+  if (factors.phone_verified <= 0) suggestions.push('Optionally link a phone number (+15 pts)');
+  if (suggestions.length === 0) {
+    suggestions.push('Keep healthy call patterns and grow trusted connections');
+  }
   return suggestions.slice(0, 3);
 }
 
@@ -63,7 +74,12 @@ function suggestActions(score: number, gap: number): string[] {
 trustRouter.get('/score', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.sub;
-    warmTrustScoreCache(userId);
+    const healed = await ensureDeviceIntegrityFactor(userId).catch(() => false);
+    if (healed) {
+      await recomputeAndPersist(userId).catch(() => {});
+    } else {
+      warmTrustScoreCache(userId);
+    }
 
     const [breakdown, history] = await Promise.all([
       getTrustScoreSnapshot(userId),
@@ -84,7 +100,7 @@ trustRouter.get('/score', requireAuth, async (req: Request, res: Response, next:
         tier: breakdown.tier,
         breakdown: breakdown.factors,
         history,
-        next_tier_info: getNextTierInfo(breakdown.total),
+        next_tier_info: getNextTierInfo(breakdown.total, breakdown.factors),
       },
     });
   } catch (err) {
@@ -99,6 +115,15 @@ trustRouter.post('/verify/govt-id/initiate', requireAuth, async (req: Request, r
     const { id_type } = z.object({
       id_type: z.enum(['aadhaar', 'pan']),
     }).parse(req.body);
+
+    const already = await queryOne<{ status: string }>(
+      `SELECT status FROM trust_factors
+        WHERE user_id = $1 AND factor_type = 'govt_id_verified' AND is_latest = TRUE`,
+      [req.user!.sub],
+    );
+    if (already?.status === 'completed') {
+      throw new AppError(409, 'GOVT_ID_ALREADY_VERIFIED', 'Your government ID is already verified.');
+    }
 
     const dg = await createDigilockerRequest();
 

@@ -55,11 +55,11 @@ export const publicLimiter = rateLimit({
   maxRequests: 10,
 });
 
-/** 60 requests / minute per authenticated user */
+/** 180 requests / minute per authenticated user (chat polls + app sync). */
 export const apiLimiter = rateLimit({
   keyFn: (req) => `api:${req.user?.sub ?? req.ip}`,
   windowSeconds: 60,
-  maxRequests: 60,
+  maxRequests: 180,
 });
 
 /**

@@ -118,7 +118,17 @@ export async function computeTrustScore(userId: string): Promise<TrustBreakdown>
   if (userFeatures) {
     try {
       const ml = await mlScoreUser(userFeatures);
-      factors.ml_modifier = ml.ml_score_delta;
+      let mlDelta = ml.ml_score_delta;
+      // Don't cold-start-penalize brand-new verified accounts with no call history.
+      // The ML ensemble often returns a large negative delta with empty features.
+      const isNewQuietAccount =
+        userFeatures.account_age_days < 7 &&
+        (userFeatures.calls_out_7d ?? 0) === 0 &&
+        (userFeatures.calls_in_7d ?? 0) === 0;
+      if (isNewQuietAccount && mlDelta < 0) {
+        mlDelta = 0;
+      }
+      factors.ml_modifier = mlDelta;
       mlResult = {
         persona_prediction: ml.persona_prediction,
         confidence:         ml.confidence,
@@ -155,6 +165,9 @@ export async function getTrustScoreSnapshot(userId: string): Promise<TrustBreakd
     if (cached) return JSON.parse(cached) as TrustBreakdown;
   } catch { /* fall through */ }
 
+  // Self-heal: onboarding always ran a device check, but older accounts may lack the factor.
+  await ensureDeviceIntegrityFactor(userId).catch(() => {});
+
   const [verif, user] = await Promise.all([
     computeVerificationPoints(userId),
     queryOne<Pick<UserRow, 'trust_score' | 'trust_tier'>>(
@@ -170,6 +183,46 @@ export async function getTrustScoreSnapshot(userId: string): Promise<TrustBreakd
   const tier = user ? user.trust_tier : scoreToTier(verif.total);
 
   return { total, tier, factors };
+}
+
+/**
+ * Credit device_integrity for KYC-complete users who never got the factor row
+ * (device check ran in onboarding but was not written to trust_factors).
+ * Returns true when a row was inserted (caller should recompute).
+ */
+export async function ensureDeviceIntegrityFactor(userId: string): Promise<boolean> {
+  const existing = await queryOne<{ factor_type: string }>(
+    `SELECT factor_type FROM trust_factors
+      WHERE user_id = $1 AND factor_type = 'device_integrity' AND is_latest = TRUE
+      LIMIT 1`,
+    [userId],
+  );
+  if (existing) return false;
+
+  const eligible = await queryOne<{ user_id: string }>(
+    `SELECT u.user_id FROM users u
+      WHERE u.user_id = $1
+        AND u.kyc_status = 'verified'
+        AND EXISTS (
+          SELECT 1 FROM trust_factors tf
+           WHERE tf.user_id = u.user_id
+             AND tf.factor_type = 'govt_id_verified'
+             AND tf.status = 'completed'
+             AND tf.is_latest = TRUE
+        )`,
+    [userId],
+  );
+  if (!eligible) return false;
+
+  await query(
+    `INSERT INTO trust_factors (user_id, factor_type, status, provider, score_delta, verified_at, is_latest)
+     VALUES ($1, 'device_integrity', 'completed', 'onboarding_backfill', 10, NOW(), TRUE)
+     ON CONFLICT (user_id, factor_type) WHERE is_latest = TRUE
+     DO UPDATE SET status = 'completed', verified_at = NOW(), score_delta = 10, provider = EXCLUDED.provider`,
+    [userId],
+  );
+  await invalidateTrustScoreCache(userId);
+  return true;
 }
 
 /**
@@ -413,11 +466,16 @@ export async function recomputeAndPersist(userId: string): Promise<TrustBreakdow
       );
     }
 
-    // Auto-review triggers
-    const mlOverride  = breakdown.ml?.override_review ?? false;
+    // Auto-review: only when score collapses below the review threshold.
+    // Do NOT flip healthy KYC-verified accounts to under_review from ML override alone
+    // (cold-start ML often false-positives on brand-new quiet accounts).
     const scoreDropped = breakdown.total < REVIEW_THRESHOLD && current.trust_score >= REVIEW_THRESHOLD;
+    const mlOverride = breakdown.ml?.override_review ?? false;
+    const kycAnchored =
+      (breakdown.factors.govt_id_verified ?? 0) > 0 && (breakdown.factors.liveness_check ?? 0) > 0;
+    const shouldReview = scoreDropped || (mlOverride && !kycAnchored && breakdown.total < 40);
 
-    if (!current.is_under_review && (scoreDropped || mlOverride)) {
+    if (!current.is_under_review && shouldReview) {
       let reason: string;
       if (mlOverride && breakdown.ml) {
         reason = `ML detected ${breakdown.ml.persona_prediction} with ${(breakdown.ml.confidence * 100).toFixed(0)}% confidence. ${breakdown.ml.flags.slice(0, 2).join(' ')}`;

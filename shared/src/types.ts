@@ -56,6 +56,11 @@ export interface UserRow {
   kyc_provider: string | null;
   kyc_doc_hash: string | null;
   kyc_verified_at: Date | null;
+  /** bcrypt hash of 6-digit account login PIN; never expose to clients */
+  pin_hash?: string | null;
+  pin_set_at?: Date | null;
+  pin_failed_attempts?: number;
+  pin_locked_until?: Date | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -81,7 +86,7 @@ export interface IdentityRow {
 
 export interface OnboardingSessionRow {
   session_id: string;
-  purpose: 'signup' | 'recovery';
+  purpose: 'signup' | 'recovery' | 'pin_reset';
   status: string;
   device_fingerprint_hash: string | null;
   integrity_verdict: Record<string, unknown>;

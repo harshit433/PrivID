@@ -8,6 +8,7 @@ import { AppError } from '../middleware/errorHandler';
 import { generateAvatarUploadUrl, uploadAvatarBuffer } from '../services/s3';
 import { issueBusinessQrToken } from '../services/businessQr';
 import { selfDeleteAccount } from '../services/accountDelete';
+import { finalizeTrustFactor } from '../services/trustScore';
 
 export const usersRouter = Router();
 
@@ -15,10 +16,11 @@ export const usersRouter = Router();
 
 usersRouter.get('/me', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const user = await queryOne<UserRow>(
+    const user = await queryOne<UserRow & { pin_set: boolean }>(
       `SELECT user_id, handle, display_name, avatar_url, trust_tier, trust_score,
               identity_id, account_status, legal_name, phone_e164, email, profession, bio, business_info,
-              onboarding_complete, discovery_mode, shadow_trust_enabled, created_at
+              onboarding_complete, discovery_mode, shadow_trust_enabled, created_at,
+              (pin_hash IS NOT NULL) AS pin_set
        FROM users WHERE user_id = $1`,
       [req.user!.sub]
     );
@@ -374,6 +376,9 @@ usersRouter.post('/me/avatar', requireAuth, async (req: Request, res: Response, 
       `UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE user_id = $2`,
       [avatarUrl, req.user!.sub]
     );
+
+    // Profile completeness (+5) depends on avatar_url — refresh trust score.
+    await finalizeTrustFactor(req.user!.sub, 'profile_avatar').catch(() => {});
 
     res.json({ ok: true, data: { avatar_url: avatarUrl } });
   } catch (err) {

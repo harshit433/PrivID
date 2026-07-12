@@ -72,10 +72,14 @@ function pathNeedsLargeJsonBody(path: string): boolean {
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(helmet());
 
-const ALLOWED_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS ?? '')
-  .split(',')
-  .map((o) => o.trim())
-  .filter(Boolean);
+const ALLOWED_ORIGINS = [
+  ...(process.env.CORS_ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean),
+  'https://www.trustroute.live',
+  'https://trustroute.live',
+];
 
 // Browser requests from our own hosted pages (e.g. simulation live dashboard) send
 // an Origin header matching the API host — allow without adding to the allowlist.

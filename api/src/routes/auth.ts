@@ -297,8 +297,7 @@ authRouter.post('/token/refresh', async (req: Request, res: Response, next: Next
       throw new AppError(401, 'INVALID_TOKEN', 'Refresh token not found or expired.');
     }
     if (stored.revoked) {
-      await query(`UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1`, [stored.user_id]);
-      throw new AppError(401, 'SESSION_INVALID', 'Your session has been invalidated. Please sign in again.');
+      throw new AppError(401, 'INVALID_TOKEN', 'Refresh token not found or expired.');
     }
     if (new Date() > stored.expires_at) {
       throw new AppError(401, 'TOKEN_EXPIRED', 'Refresh token expired.');

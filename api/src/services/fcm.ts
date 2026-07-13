@@ -152,7 +152,7 @@ export interface ActivitySessionSignal {
   scope_id: string;
   adapter: ActivityAdapter;
   status: ActivityStatus;
-  livekit_room_id: string;
+  stream_call_id: string;
   host_user_id: string;
   controller_user_id: string;
   presenter_user_id?: string | null;

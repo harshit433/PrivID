@@ -23,7 +23,6 @@ import {
 } from '../services/stream';
 import { logger } from '../utils/logger';
 import crypto from 'crypto';
-import { AccessToken } from 'livekit-server-sdk';
 import { Queue } from 'bullmq';
 
 // ─── BullMQ ring-timeout queue (lazy-initialized) ────────────────────────────
@@ -327,63 +326,6 @@ callsRouter.post('/:id/end', requireAuth, async (req: Request, res: Response, ne
     res.json({ ok: true, data: { call_id: updatedCall.call_id, status: updatedCall.status, duration_seconds: updatedCall.duration_seconds } });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
-    next(err);
-  }
-});
-
-// ─── POST /calls/:id/livekit-token ───────────────────────────────────────────
-// Returns a short-lived LiveKit JWT for the requesting participant to join
-// the call room.  Both caller and callee call this independently.
-
-callsRouter.post('/:id/livekit-token', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const call = await queryOne<CallRow>(
-      `SELECT * FROM calls WHERE call_id = $1 AND (caller_id = $2 OR callee_id = $2)`,
-      [req.params.id, req.user!.sub],
-    );
-    if (!call) throw new AppError(404, 'CALL_NOT_FOUND', 'Call not found.');
-    if (!['initiated', 'ringing', 'answered'].includes(call.status)) {
-      throw new AppError(409, 'CALL_ENDED', 'Call is no longer active.');
-    }
-
-    const apiKey = process.env.LIVEKIT_API_KEY;
-    const apiSecret = process.env.LIVEKIT_API_SECRET;
-    const livekitUrl = process.env.LIVEKIT_URL;
-    if (!apiKey || !apiSecret || !livekitUrl) {
-      logger.warn(
-        'calls',
-        `LiveKit NOT configured (url=${!!livekitUrl}, key=${!!apiKey}, secret=${!!apiSecret}) — ` +
-          `calls cannot connect. Set LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET.`,
-      );
-      if (process.env.NODE_ENV === 'production') {
-        throw new AppError(503, 'CALLS_UNAVAILABLE', 'Calling is briefly unavailable.');
-      }
-    }
-    const resolvedKey = apiKey ?? 'devkey';
-    const resolvedSecret = apiSecret ?? 'devsecret';
-    const resolvedUrl = livekitUrl ?? 'ws://localhost:7880';
-
-    const user = await queryOne<{ handle: string; display_name: string }>(
-      `SELECT handle, display_name FROM users WHERE user_id = $1`,
-      [req.user!.sub],
-    );
-
-    const at = new AccessToken(resolvedKey, resolvedSecret, {
-      identity: req.user!.sub,
-      name: user?.display_name ?? user?.handle ?? req.user!.sub,
-      ttl: '15m',
-    });
-    at.addGrant({
-      roomJoin: true,
-      room: call.webrtc_room_id ?? undefined,
-      canPublish: true,
-      canSubscribe: true,
-      canPublishData: true,
-    });
-
-    const token = await at.toJwt();
-    res.json({ ok: true, data: { token, url: resolvedUrl } });
-  } catch (err) {
     next(err);
   }
 });

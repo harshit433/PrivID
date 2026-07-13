@@ -1,10 +1,10 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import crypto from 'crypto';
-import { AccessToken } from 'livekit-server-sdk';
 import { query, queryOne, withTransaction } from '@trustroute/shared';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
+import { upsertStreamUser, isStreamConfigured } from '../services/stream';
 import {
   rtdbAppendActivityMessage,
   rtdbCreateActivitySession,
@@ -36,7 +36,7 @@ interface ActivityRow {
   group_id: string | null;
   adapter: ActivityAdapter;
   status: ActivityStatus;
-  livekit_room_id: string;
+  stream_call_id: string;
   host_user_id: string;
   controller_user_id: string;
   presenter_user_id: string | null;
@@ -142,7 +142,7 @@ function serializeActivity(row: ActivityRow, participants: ActivityParticipantRo
     direct_member_high: row.direct_member_high,
     adapter: row.adapter,
     status: row.status,
-    livekit_room_id: row.livekit_room_id,
+    stream_call_id: row.stream_call_id,
     host_user_id: row.host_user_id,
     controller_user_id: row.controller_user_id,
     presenter_user_id: row.presenter_user_id,
@@ -341,7 +341,13 @@ activitiesRouter.post('/sessions', requireAuth, async (req: Request, res: Respon
     const body = startSchema.parse(req.body);
     const creatorId = req.user!.sub;
     const creator = await getUserLite(creatorId);
-    const livekitRoomId = `activity-${crypto.randomBytes(18).toString('base64url')}`;
+    if (!isStreamConfigured()) {
+      throw new AppError(503, 'STREAM_NOT_CONFIGURED', 'Activity parties are not available.');
+    }
+
+    await upsertStreamUser(creator);
+
+    const streamCallId = `activity-${crypto.randomBytes(18).toString('base64url')}`;
     const state = initialState(body.adapter, creatorId, body.initial_video_id);
 
     const row = await withTransaction(async (client) => {
@@ -350,7 +356,7 @@ activitiesRouter.post('/sessions', requireAuth, async (req: Request, res: Respon
         const [low, high] = await assertDirectAllowed(creatorId, body.other_user_id);
         const { rows } = await client.query<ActivityRow>(
           `INSERT INTO activity_sessions
-             (scope_type, direct_member_low, direct_member_high, adapter, livekit_room_id,
+             (scope_type, direct_member_low, direct_member_high, adapter, stream_call_id,
               host_user_id, controller_user_id, presenter_user_id, created_by, last_state)
            VALUES ('direct', $1, $2, $3, $4, $5, $5, $6, $5, $7)
            RETURNING *`,
@@ -358,7 +364,7 @@ activitiesRouter.post('/sessions', requireAuth, async (req: Request, res: Respon
             low,
             high,
             body.adapter,
-            livekitRoomId,
+            streamCallId,
             creatorId,
             body.adapter === 'screen_share' ? creatorId : null,
             state,
@@ -369,14 +375,14 @@ activitiesRouter.post('/sessions', requireAuth, async (req: Request, res: Respon
         await assertGroupMember(creatorId, body.group_id);
         const { rows } = await client.query<ActivityRow>(
           `INSERT INTO activity_sessions
-             (scope_type, group_id, adapter, livekit_room_id,
+             (scope_type, group_id, adapter, stream_call_id,
               host_user_id, controller_user_id, presenter_user_id, created_by, last_state)
            VALUES ('group', $1, $2, $3, $4, $4, $5, $4, $6)
            RETURNING *`,
           [
             body.group_id,
             body.adapter,
-            livekitRoomId,
+            streamCallId,
             creatorId,
             body.adapter === 'screen_share' ? creatorId : null,
             state,
@@ -400,7 +406,7 @@ activitiesRouter.post('/sessions', requireAuth, async (req: Request, res: Respon
       scope_id: scopeId(row),
       adapter: row.adapter,
       status: row.status,
-      livekit_room_id: row.livekit_room_id,
+      stream_call_id: row.stream_call_id,
       host_user_id: row.host_user_id,
       controller_user_id: row.controller_user_id,
       presenter_user_id: row.presenter_user_id,
@@ -677,41 +683,6 @@ activitiesRouter.post('/sessions/:id/messages', requireAuth, async (req: Request
     res.status(201).json({ ok: true, data: { message_id: messageId } });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
-    next(err);
-  }
-});
-
-// ─── POST /activities/sessions/:id/livekit-token ─────────────────────────────
-
-activitiesRouter.post('/sessions/:id/livekit-token', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const userId = req.user!.sub;
-    const row = await getActivity(req.params.id);
-    if (row.status !== 'active') throw new AppError(409, 'ACTIVITY_ENDED', 'This activity has ended.');
-    await assertActivityAccess(row, userId);
-    await assertActiveParticipant(row.activity_id, userId);
-
-    const apiKey = process.env.LIVEKIT_API_KEY ?? 'devkey';
-    const apiSecret = process.env.LIVEKIT_API_SECRET ?? 'devsecret';
-    const livekitUrl = process.env.LIVEKIT_URL ?? 'ws://localhost:7880';
-    const user = await getUserLite(userId);
-
-    const at = new AccessToken(apiKey, apiSecret, {
-      identity: userId,
-      name: user.display_name ?? user.handle,
-      ttl: '2h',
-    });
-    at.addGrant({
-      roomJoin: true,
-      room: row.livekit_room_id,
-      canPublish: true,
-      canSubscribe: true,
-      canPublishData: true,
-    });
-
-    const token = await at.toJwt();
-    res.json({ ok: true, data: { token, url: livekitUrl } });
-  } catch (err) {
     next(err);
   }
 });

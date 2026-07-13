@@ -1,6 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { AccessToken } from 'livekit-server-sdk';
 import { requireAuth } from '../middleware/auth';
 import { AppError } from '../middleware/errorHandler';
 import { query, queryOne } from '@trustroute/shared';
@@ -22,6 +21,7 @@ import {
 } from '../services/nativeChat';
 import { notifyConversationMembers } from '../services/chatPubSub';
 import { chatSendLimiter } from '../middleware/rateLimit';
+import { isStreamConfigured, upsertStreamUser } from '../services/stream';
 
 export const chatsRouter = Router();
 chatsRouter.use(requireAuth);
@@ -243,48 +243,41 @@ chatsRouter.get('/:id/media', async (req: Request, res: Response, next: NextFunc
   }
 });
 
-// Group A/V call — LiveKit room per conversation
+// Group A/V call — Stream Video call per conversation
 chatsRouter.post('/:id/call', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { mode } = z.object({ mode: z.enum(['voice', 'video']).default('voice') }).parse(req.body ?? {});
     const convId = req.params.id!;
     await assertMember(convId, req.user!.sub);
 
-    const apiKey = process.env.LIVEKIT_API_KEY;
-    const apiSecret = process.env.LIVEKIT_API_SECRET;
-    const livekitUrl = process.env.LIVEKIT_URL ?? 'ws://localhost:7880';
-    if (!apiKey || !apiSecret) {
-      throw new AppError(503, 'LIVEKIT_NOT_CONFIGURED', 'Group calls are not available.');
+    if (!isStreamConfigured()) {
+      throw new AppError(503, 'STREAM_NOT_CONFIGURED', 'Group calls are not available.');
     }
 
-    const roomName = `groupchat-${convId}`;
-    const at = new AccessToken(apiKey, apiSecret, {
-      identity: req.user!.sub,
-      ttl: '2h',
-    });
-    at.addGrant({
-      roomJoin: true,
-      room: roomName,
-      canPublish: true,
-      canSubscribe: true,
-    });
-
-    const members = await query<{ user_id: string }>(
-      `SELECT user_id FROM conversation_members WHERE conv_id = $1 AND user_id <> $2`,
-      [convId, req.user!.sub],
+    const members = await query<{ user_id: string; handle: string; display_name: string | null; avatar_url: string | null }>(
+      `SELECT u.user_id, u.handle, u.display_name, u.avatar_url
+         FROM conversation_members cm
+         JOIN users u ON u.user_id = cm.user_id
+        WHERE cm.conv_id = $1`,
+      [convId],
     );
+    await Promise.all(members.map((m) => upsertStreamUser(m)));
+
+    const callId = `groupchat-${convId}`;
+
+    const others = members.filter((m) => m.user_id !== req.user!.sub);
     const { sendGroupCallPush } = await import('../services/fcm');
-    for (const m of members) {
+    for (const m of others) {
       void sendGroupCallPush(m.user_id, convId, req.user!.sub, mode);
     }
 
     res.json({
       ok: true,
       data: {
-        room_id: roomName,
-        token: await at.toJwt(),
-        url: livekitUrl,
+        call_id: callId,
+        call_type: 'group',
         mode,
+        member_ids: members.map((m) => m.user_id),
       },
     });
   } catch (err) {

@@ -52,6 +52,7 @@ import { apiLimiter, publicLimiter } from './middleware/rateLimit';
 import { getPool, connectRedis, getRedis } from '@trustroute/shared';
 import { isStreamConfigured } from './services/stream';
 import { isLivenessConfigured, isMockLiveness } from './services/liveness';
+import { isFirebaseConfigured } from './services/fcm';
 import { isDigilockerConfigured, isMockKyc } from './services/digilocker';
 import { digilockerCallbackRouter } from './routes/digilockerCallback';
 import { logger } from './utils/logger';
@@ -132,6 +133,7 @@ app.get('/health', async (_req, res) => {
       ts: new Date().toISOString(),
       redis_ok,
       stream_chat_configured: isStreamConfigured(),
+      firebase_configured: isFirebaseConfigured(),
       liveness_configured: isLivenessConfigured(),
       liveness_mock: isMockLiveness(),
       digilocker_configured: isDigilockerConfigured(),
@@ -328,6 +330,15 @@ async function startServer(): Promise<void> {
   const httpServer = http.createServer(app);
   const { attachChatWebSocket } = await import('./services/chatWsGateway');
   attachChatWebSocket(httpServer);
+
+  // In-process call ring-timeout safety net (45s). Guarantees stuck "ringing"
+  // rows are cleaned up server-side whenever the API is running.
+  try {
+    const { startRingTimeoutWorker } = await import('./services/ringTimeoutWorker');
+    startRingTimeoutWorker();
+  } catch (err) {
+    console.warn('[API] ring-timeout worker failed to start:', err);
+  }
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     logger.debug('API', `Running on http://0.0.0.0:${PORT} (WS /ws/chat)`);

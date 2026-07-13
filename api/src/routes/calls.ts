@@ -248,23 +248,46 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
 
     const webrtcRoomId = crypto.randomBytes(16).toString('base64url');
 
-    const [call] = await withTransaction(async (client) => {
-      // Serialise concurrent initiation attempts from the same caller
+    const { call, reused } = await withTransaction<{ call: CallRow; reused: boolean }>(async (client) => {
+      // Serialise concurrent initiation attempts from the same caller so a
+      // double-tap / retry can't create two competing invites.
       await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`call_init_${callerId}`]);
 
-      // Check callee is not already in a call
+      const ACTIVE = `('initiated','ringing','answered')`;
+
+      // ── Idempotency ────────────────────────────────────────────────────────
+      // If this caller already has a live invite to THIS callee, return it
+      // instead of erroring. This is what makes initiate safe to call twice:
+      // the second call is a no-op that re-joins the same room, so we never
+      // busy-conflict against our own ring or orphan the first invite.
+      const existing = await client.query<CallRow>(
+        `SELECT * FROM calls
+          WHERE caller_id = $1 AND callee_id = $2 AND status IN ${ACTIVE}
+          ORDER BY created_at DESC LIMIT 1`,
+        [callerId, calleeId],
+      );
+      if ((existing.rowCount ?? 0) > 0) {
+        return { call: existing.rows[0], reused: true };
+      }
+
+      // ── Callee busy (with a DIFFERENT caller) ────────────────────────────────
       const activeCallee = await client.query(
-        `SELECT 1 FROM calls WHERE callee_id = $1 AND status IN ('initiated','ringing','answered') LIMIT 1`,
-        [calleeId]
+        `SELECT 1 FROM calls
+          WHERE callee_id = $1 AND caller_id <> $2 AND status IN ${ACTIVE} LIMIT 1`,
+        [calleeId, callerId],
       );
       if ((activeCallee.rowCount ?? 0) > 0) {
         throw new AppError(409, 'CALLEE_BUSY', 'The person you are calling is already on a call.');
       }
 
-      // Check caller is not already in a call
+      // ── Caller busy (in ANY other call, as caller or callee) ─────────────────
       const activeCaller = await client.query(
-        `SELECT 1 FROM calls WHERE caller_id = $1 AND status IN ('initiated','ringing','answered') LIMIT 1`,
-        [callerId]
+        `SELECT 1 FROM calls
+          WHERE (caller_id = $1 OR callee_id = $1)
+            AND status IN ${ACTIVE}
+            AND NOT (caller_id = $1 AND callee_id = $2)
+          LIMIT 1`,
+        [callerId, calleeId],
       );
       if ((activeCaller.rowCount ?? 0) > 0) {
         throw new AppError(409, 'CALLER_BUSY', 'You already have an active call in progress.');
@@ -288,8 +311,23 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
         );
       }
 
-      return rows;
+      return { call: rows[0], reused: false };
     });
+
+    // A reused invite already fired its push / ring-timeout / RTDB write on the
+    // first initiate — return it immediately without duplicating side effects
+    // (avoids double-ringing the callee).
+    if (reused) {
+      res.status(201).json({
+        ok: true,
+        data: {
+          call_id: call.call_id,
+          webrtc_room_id: call.webrtc_room_id,
+          status: call.status,
+        },
+      });
+      return;
+    }
 
     // ── Post-response work: behavior tracking + RTDB + FCM ───────────────────
     // None of these affect the caller's response — move them off the hot path.
@@ -414,7 +452,10 @@ callsRouter.post('/:id/end', requireAuth, async (req: Request, res: Response, ne
          FOR UPDATE
        )
        UPDATE calls SET
-         status = CASE WHEN prev.status = 'answered' THEN 'ended' ELSE $1 END,
+         status = CASE
+           WHEN prev.status = 'answered'::call_status THEN 'ended'::call_status
+           ELSE $1::call_status
+         END,
          ended_at = NOW(),
          duration_seconds = CASE
            WHEN started_at IS NOT NULL
@@ -453,7 +494,11 @@ callsRouter.post('/:id/end', requireAuth, async (req: Request, res: Response, ne
               `SELECT fcm_token FROM users WHERE user_id = $1`, [notifyUserId]
             );
             if (notifyUser?.fcm_token) {
-              await sendCallCancelledPush(notifyUser.fcm_token, req.params.id);
+              await sendCallCancelledPush(
+                notifyUser.fcm_token,
+                req.params.id,
+                finalStatus as 'declined' | 'missed' | 'failed',
+              );
             }
           } catch { /* best effort */ }
         });

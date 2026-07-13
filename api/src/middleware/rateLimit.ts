@@ -48,11 +48,11 @@ export function rateLimit(opts: RateLimitOptions) {
 
 // ─── Pre-built limiters ───────────────────────────────────────────────────────
 
-/** 10 requests / minute per IP for public unauthenticated endpoints */
+/** 30 requests / minute per IP for public unauthenticated endpoints (login + handle check). */
 export const publicLimiter = rateLimit({
   keyFn: (req) => `public:${req.ip}`,
   windowSeconds: 60,
-  maxRequests: 10,
+  maxRequests: 30,
 });
 
 /** 180 requests / minute per authenticated user (chat polls + app sync). */

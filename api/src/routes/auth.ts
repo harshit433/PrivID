@@ -26,6 +26,42 @@ export const authRouter = Router();
 
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
+// ─── POST /auth/check-handle ─────────────────────────────────────────────────
+// Lightweight existence check used by the login screen BEFORE asking for a PIN.
+// Rate-limited; returns only exists + pin_set (no PII).
+
+const checkHandleSchema = z.object({
+  handle: z.string().min(1).max(40),
+});
+
+authRouter.post('/check-handle', publicLimiter, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const body = checkHandleSchema.parse(req.body ?? {});
+    const normalized = body.handle.trim().toLowerCase().replace(/^@/, '');
+    if (!/^[a-z0-9._]{3,30}$/.test(normalized)) {
+      throw new AppError(400, 'HANDLE_INVALID', 'Handles can use letters, numbers, dots and underscores.');
+    }
+
+    const user = await getUserByHandleForLogin(normalized);
+    if (!user) {
+      throw new AppError(404, 'HANDLE_NOT_FOUND', 'No TrustRoute account found with that handle.');
+    }
+
+    // Soft account states still "exist" for login UX; pin login will assert access.
+    res.json({
+      ok: true,
+      data: {
+        exists: true,
+        pin_set: pinSet(user),
+        handle: user.handle,
+      },
+    });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
 function authUserPayload(user: UserRow): object {
   return {
     user_id: user.user_id,

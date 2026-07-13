@@ -58,6 +58,15 @@ function getDb(): admin.database.Database | null {
   try { return admin.database(); } catch { return null; }
 }
 
+/**
+ * True when the Firebase Admin SDK initialised — i.e. FCM pushes and RTDB
+ * signaling can actually be sent. When false, every push silently no-ops, so
+ * this is the first thing to check when "notifications aren't working".
+ */
+export function isFirebaseConfigured(): boolean {
+  return getApp() !== null;
+}
+
 // ── RTDB — Call Signaling ─────────────────────────────────────────────────────
 
 /** Used by the debug health endpoint to verify RTDB connectivity. */
@@ -379,7 +388,10 @@ export async function sendIncomingCallPush(
   payload:  IncomingCallPayload,
 ): Promise<void> {
   const app = getApp();
-  if (!app) return;
+  if (!app) {
+    logger.warn('FCM', `Call wake-push NOT sent — Firebase Admin not configured (call ${payload.callId}). Set FIREBASE_SERVICE_ACCOUNT_JSON.`);
+    return;
+  }
   try {
     await app.messaging().send({
       token: fcmToken,
@@ -431,13 +443,17 @@ export async function sendIncomingCallPush(
 
 // ── FCM — Call cancelled push ─────────────────────────────────────────────────
 
-export async function sendCallCancelledPush(fcmToken: string, callId: string): Promise<void> {
+export async function sendCallCancelledPush(
+  fcmToken: string,
+  callId: string,
+  reason: 'declined' | 'missed' | 'failed' | 'ended' = 'missed',
+): Promise<void> {
   const app = getApp();
   if (!app) return;
   try {
     await app.messaging().send({
       token:   fcmToken,
-      data:    { type: 'call_cancelled', call_id: callId },
+      data:    { type: 'call_cancelled', call_id: callId, reason },
       android: { priority: 'high', ttl: 0 },
       apns: {
         headers: { 'apns-priority': '10', 'apns-push-type': 'background' },

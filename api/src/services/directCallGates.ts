@@ -16,13 +16,12 @@ export function isStreamBackedCall(webrtcRoomId: string | null | undefined): boo
 export const initiateSchema = z.object({
   callee_id: z.string().uuid().optional(),
   channel_token: z.string().optional(),
+  video: z.boolean().optional(),
 }).refine((d) => d.callee_id || d.channel_token, {
   message: 'Either callee_id or channel_token is required.',
 });
 
-export const streamPrepareSchema = initiateSchema.extend({
-  video: z.boolean().optional().default(false),
-});
+export const streamPrepareSchema = initiateSchema;
 
 export function dynamicCooldownMs(calls: Array<{ status: string }>): number {
   if (calls.length === 0) return 0;

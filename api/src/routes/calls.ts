@@ -83,6 +83,7 @@ callsRouter.post('/stream/prepare', requireAuth, async (req: Request, res: Respo
     }
 
     const body = streamPrepareSchema.parse(req.body);
+    const video = body.video ?? false;
     const callerId = req.user!.sub;
     const { calleeId, channelId, callType } = await resolveDirectCallTarget(callerId, body);
 
@@ -100,7 +101,7 @@ callsRouter.post('/stream/prepare', requireAuth, async (req: Request, res: Respo
           call_id: call.call_id,
           call_type: callType,
           stream: true,
-          video: body.video,
+          video,
         }).catch(() => {});
 
         // Ensure both parties exist in Stream for ringing + push.
@@ -120,7 +121,7 @@ callsRouter.post('/stream/prepare', requireAuth, async (req: Request, res: Respo
       ok: true,
       data: {
         call_id: call.call_id,
-        video: body.video,
+        video,
         status: call.status,
       },
     });
@@ -133,9 +134,6 @@ callsRouter.post('/stream/prepare', requireAuth, async (req: Request, res: Respo
 // ─── POST /calls/initiate ─────────────────────────────────────────────────────
 // Legacy LiveKit path — kept for reachability / rollback. Mobile 1:1 uses /stream/prepare.
 
-// NOTE: callLimiter removed — trusted contacts must have zero restrictions.
-// Rate limiting for unknown callers is handled inside the handler after
-// connection type is resolved.
 callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = initiateSchema.parse(req.body);
@@ -151,9 +149,6 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
       webrtcRoomId,
     );
 
-    // A reused invite already fired its push / ring-timeout / RTDB write on the
-    // first initiate — return it immediately without duplicating side effects
-    // (avoids double-ringing the callee).
     if (reused) {
       res.status(201).json({
         ok: true,
@@ -166,29 +161,19 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
       return;
     }
 
-    // ── Post-response work: behavior tracking + RTDB + FCM ───────────────────
-    // None of these affect the caller's response — move them off the hot path.
-    // setImmediate fires after the current event-loop tick (i.e. after the HTTP
-    // response is flushed), so the caller sees the 201 immediately.
     setImmediate(() => {
       trackEvent(callerId, 'call_initiated', calleeId, { call_id: call.call_id, call_type: callType })
         .catch(() => {});
     });
 
-    // ── RTDB: write initial call state (fire-and-forget) ─────────────────────
     rtdbCreateCall(call.call_id, callerId, calleeId).catch(() => {});
 
-    // ── Server-side ring timeout (45s) — persistent via BullMQ ─────────────
-    // Using a delayed BullMQ job instead of setTimeout so the timeout survives
-    // server restarts and rolling deploys.
     getRingTimeoutQueue().add(
       'ring-timeout',
       { call_id: call.call_id },
       { delay: 45_000, jobId: `ring-${call.call_id}`, removeOnComplete: true, removeOnFail: 10 },
     ).catch((err: any) => logger.warn('calls', 'Failed to enqueue ring timeout:', err?.message));
 
-    // ── FCM push to callee ────────────────────────────────────────────────────
-    // Single query: get caller info + callee's FCM token + connection type
     ;(async () => {
       try {
         const [caller, callee, conn] = await Promise.all([
@@ -213,17 +198,16 @@ callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, n
         if (!caller) return;
 
         await sendIncomingCallPush(callee.fcm_token, {
-          callId:          call.call_id,
-          webrtcRoomId:    call.webrtc_room_id ?? '',
-          fromUserId:      callerId,
-          handle:          caller.handle,
-          displayName:     caller.display_name ?? caller.handle,
-          avatarUrl:       caller.avatar_url   ?? undefined,
-          trustTier:       caller.trust_tier,
-          trustScore:      caller.trust_score,
-          connectionType:  conn?.connection_type,
+          callId: call.call_id,
+          webrtcRoomId: call.webrtc_room_id ?? '',
+          fromUserId: callerId,
+          handle: caller.handle,
+          displayName: caller.display_name ?? caller.handle,
+          avatarUrl: caller.avatar_url ?? undefined,
+          trustTier: caller.trust_tier,
+          trustScore: caller.trust_score,
+          connectionType: conn?.connection_type,
         });
-        logger.debug('calls', `FCM push sent to ${calleeId} for call ${call.call_id}`);
       } catch (err: any) {
         logger.warn('calls', 'FCM push error:', err?.message);
       }
@@ -340,7 +324,7 @@ callsRouter.post('/:id/end', requireAuth, async (req: Request, res: Response, ne
       }
     }
 
-    res.json({ ok: true, data: { call_id: updated.call_id, status: updated.status, duration_seconds: updated.duration_seconds } });
+    res.json({ ok: true, data: { call_id: updatedCall.call_id, status: updatedCall.status, duration_seconds: updatedCall.duration_seconds } });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
     next(err);

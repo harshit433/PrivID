@@ -78,7 +78,7 @@ export async function testRtdbWrite(): Promise<void> {
 
 export type CallSignalStatus =
   | 'ringing'   // call created, waiting for callee
-  | 'answered'  // callee answered — LiveKit takes over
+  | 'answered'  // callee answered — Stream media takes over
   | 'declined'  // callee explicitly declined
   | 'missed'    // caller cancelled / 45s timeout
   | 'ended'     // active call ended by either party

@@ -131,7 +131,7 @@ callsRouter.post('/stream/prepare', requireAuth, async (req: Request, res: Respo
 });
 
 // ─── POST /calls/initiate ─────────────────────────────────────────────────────
-// Legacy LiveKit path — kept for reachability / rollback. Mobile 1:1 uses /stream/prepare.
+// Legacy RTDB signaling path. Mobile 1:1 uses /stream/prepare.
 
 callsRouter.post('/initiate', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -245,7 +245,7 @@ callsRouter.post('/:id/answer', requireAuth, async (req: Request, res: Response,
       throw new AppError(409, 'CALL_NOT_ANSWERABLE', 'Call is no longer available.');
     }
 
-    // Legacy LiveKit path only — Stream owns media state for stream-backed calls.
+    // RTDB signaling only — Stream owns media state for stream-backed calls.
     if (!isStreamBackedCall(call.webrtc_room_id)) {
       rtdbUpdateStatus(req.params.id, 'answered').catch(() => {});
     }
@@ -297,7 +297,7 @@ callsRouter.post('/:id/end', requireAuth, async (req: Request, res: Response, ne
     const call = updatedCall;
     const finalStatus = updatedCall.status as string;
 
-    // Legacy LiveKit path — Stream-backed calls skip RTDB + custom FCM cancel.
+    // Stream-backed calls skip RTDB + custom FCM cancel.
     if (!isStreamBackedCall(call.webrtc_room_id)) {
       rtdbUpdateStatus(req.params.id, finalStatus as any).catch(() => {});
 

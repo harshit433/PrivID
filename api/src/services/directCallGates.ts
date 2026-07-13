@@ -1,6 +1,6 @@
 /**
  * Shared TrustRoute policy gates for 1:1 direct / reachability calls.
- * Used by both legacy LiveKit initiate and Stream Video prepare.
+ * Used by Stream Video prepare and legacy direct-call initiate.
  */
 import { z } from 'zod';
 import { query, queryOne, withTransaction, getRedis } from '@trustroute/shared';

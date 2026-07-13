@@ -15,6 +15,7 @@
 import { Worker } from 'bullmq';
 import IORedis from 'ioredis';
 import { queryOne } from '@trustroute/shared';
+import { isStreamBackedCall } from './directCallGates';
 import { rtdbUpdateStatus, sendCallCancelledPush } from './fcm';
 import { logger } from '../utils/logger';
 
@@ -35,17 +36,18 @@ export function startRingTimeoutWorker(): Worker | null {
     async (job) => {
       const { call_id } = job.data;
 
-      const updated = await queryOne<{ callee_id: string; caller_id: string }>(
+      const updated = await queryOne<{ callee_id: string; caller_id: string; webrtc_room_id: string | null }>(
         `UPDATE calls SET status = 'missed'::call_status, ended_at = NOW()
           WHERE call_id = $1 AND status IN ('initiated','ringing')
-        RETURNING callee_id, caller_id`,
+        RETURNING callee_id, caller_id, webrtc_room_id`,
         [call_id],
       );
-      if (!updated) return; // already answered / ended — idempotent no-op
+      if (!updated) return;
 
       logger.debug('ringTimeout', `call ${call_id} timed out — marked missed`);
 
-      // Signal both devices instantly (they drop the ringing UI on 'missed').
+      if (isStreamBackedCall(updated.webrtc_room_id)) return;
+
       await rtdbUpdateStatus(call_id, 'missed').catch(() => {});
 
       // Dismiss the callee's incoming notification on background/killed devices.

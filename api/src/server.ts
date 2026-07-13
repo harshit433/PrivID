@@ -134,6 +134,9 @@ app.get('/health', async (_req, res) => {
       redis_ok,
       stream_chat_configured: isStreamConfigured(),
       firebase_configured: isFirebaseConfigured(),
+      livekit_configured: Boolean(
+        process.env.LIVEKIT_URL && process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET,
+      ),
       liveness_configured: isLivenessConfigured(),
       liveness_mock: isMockLiveness(),
       digilocker_configured: isDigilockerConfigured(),

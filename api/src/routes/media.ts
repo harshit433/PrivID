@@ -38,11 +38,14 @@ function getS3() {
 export const mediaRouter = Router();
 mediaRouter.use(requireAuth);
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 const presignSchema = z.object({
   kind: z.enum(['image', 'video', 'audio', 'doc']),
   content_type: z.string().min(3).max(100),
   size_bytes: z.number().int().positive(),
-  conv_id: z.string().uuid().optional(),
+  // Native chat UUID, or omitted for Matrix rooms (!room:server) / legacy clients.
+  conv_id: z.string().max(255).optional(),
 });
 
 mediaRouter.post('/presign', async (req: Request, res: Response, next: NextFunction) => {
@@ -84,7 +87,14 @@ mediaRouter.post('/presign', async (req: Request, res: Response, next: NextFunct
     await query(
       `INSERT INTO media_assets (media_ref, owner_id, conv_id, kind, size_bytes, s3_key, status)
        VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
-      [mediaRef, req.user!.sub, body.conv_id ?? null, body.kind, body.size_bytes, key],
+      [
+        mediaRef,
+        req.user!.sub,
+        body.conv_id && UUID_RE.test(body.conv_id) ? body.conv_id : null,
+        body.kind,
+        body.size_bytes,
+        key,
+      ],
     );
 
     res.json({

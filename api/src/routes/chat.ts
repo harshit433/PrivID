@@ -27,8 +27,96 @@ import {
   deleteMessageAsAdmin,
 } from '../services/stream';
 import { ensureNativeGroupConversation } from '../services/nativeChat';
+import {
+  getMatrixTokenPayload,
+  getOrCreateDmRoom,
+  createGroupRoom,
+  getRoomForGroup,
+  isMatrixConfigured,
+} from '../services/matrix';
 
 export const chatRouter = Router();
+
+// ─── GET /chat/matrix-token ───────────────────────────────────────────────────
+// Mint a Synapse session (access_token + homeserver) for the current user.
+
+chatRouter.get('/matrix-token', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (!isMatrixConfigured()) {
+      throw new AppError(503, 'MATRIX_NOT_CONFIGURED', 'Matrix chat is not configured.');
+    }
+    const me = await queryOne<UserLite>(
+      `SELECT user_id, handle, display_name, avatar_url, trust_tier, trust_score
+       FROM users WHERE user_id = $1`,
+      [req.user!.sub],
+    );
+    if (!me) throw new AppError(404, 'USER_NOT_FOUND', 'User not found.');
+    const payload = await getMatrixTokenPayload(me.user_id, me.display_name ?? me.handle);
+    res.json({ ok: true, data: payload });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── POST /chat/matrix/dm ─────────────────────────────────────────────────────
+// Gated DM room create/open. Clients must not invent free-for-all DMs.
+
+const matrixDmSchema = z.object({
+  other_user_id: z.string().uuid().optional(),
+  handle: z.string().optional(),
+}).refine((d) => d.other_user_id || d.handle, {
+  message: 'Either other_user_id or handle is required.',
+});
+
+chatRouter.post('/matrix/dm', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (!isMatrixConfigured()) {
+      throw new AppError(503, 'MATRIX_NOT_CONFIGURED', 'Matrix chat is not configured.');
+    }
+    const body = matrixDmSchema.parse(req.body);
+    const myId = req.user!.sub;
+    const other = await queryOne<UserLite>(
+      body.other_user_id
+        ? `SELECT user_id, handle, display_name, avatar_url, trust_tier, trust_score FROM users WHERE user_id = $1 AND is_active = TRUE`
+        : `SELECT user_id, handle, display_name, avatar_url, trust_tier, trust_score FROM users WHERE handle = $1 AND is_active = TRUE`,
+      [body.other_user_id ?? body.handle],
+    );
+    if (!other) throw new AppError(404, 'USER_NOT_FOUND', 'User not found.');
+    if (other.user_id === myId) throw new AppError(400, 'SELF_CHAT', 'Cannot message yourself.');
+
+    const room = await getOrCreateDmRoom(myId, other.user_id);
+    const context = await buildContext(myId, other);
+    res.status(room.created ? 201 : 200).json({
+      ok: true,
+      data: {
+        room_id: room.room_id,
+        other_user_id: other.user_id,
+        created: room.created,
+        ...context,
+      },
+    });
+  } catch (err) {
+    if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));
+    next(err);
+  }
+});
+
+// ─── GET /chat/matrix/dm/:otherUserId/context ─────────────────────────────────
+chatRouter.get('/matrix/dm/:otherUserId/context', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const myId = req.user!.sub;
+    const other = await queryOne<UserLite>(
+      `SELECT user_id, handle, display_name, avatar_url, trust_tier, trust_score
+       FROM users WHERE user_id = $1 AND is_active = TRUE`,
+      [req.params.otherUserId],
+    );
+    if (!other) throw new AppError(404, 'USER_NOT_FOUND', 'User not found.');
+    const context = await buildContext(myId, other);
+    res.json({ ok: true, data: context });
+  } catch (err) {
+    next(err);
+  }
+});
 
 interface UserLite {
   user_id: string;
@@ -40,10 +128,18 @@ interface UserLite {
 }
 
 // ─── GET /chat/token ──────────────────────────────────────────────────────────
-// Issued on every app launch. Upserts the user into Stream and returns a token.
+// Legacy Stream Chat messaging token. Prefer Stream Video tokens from /calls.
+// Still upserts the Stream user for any residual chat clients / webhooks.
 
 chatRouter.get('/token', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    if (isMatrixConfigured()) {
+      throw new AppError(
+        410,
+        'STREAM_MESSAGING_RETIRED',
+        'Stream Chat messaging is retired. Use GET /chat/matrix-token for messaging; Stream Video tokens stay on /calls.',
+      );
+    }
     if (!isStreamConfigured()) {
       throw new AppError(503, 'STREAM_NOT_CONFIGURED', 'Chat is not configured on the server.');
     }
@@ -120,6 +216,13 @@ const channelSchema = z.object({
 
 chatRouter.post('/channels', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    if (isMatrixConfigured()) {
+      throw new AppError(
+        410,
+        'USE_MATRIX_DM',
+        'Stream messaging is retired. Open DMs via POST /chat/matrix/dm.',
+      );
+    }
     if (!isStreamConfigured()) {
       throw new AppError(503, 'STREAM_NOT_CONFIGURED', 'Chat is not configured on the server.');
     }
@@ -296,13 +399,16 @@ const createGroupSchema = z.object({
 // ─── POST /chat/groups ────────────────────────────────────────────────────────
 chatRouter.post('/groups', requireAuth, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    if (!isStreamConfigured()) throw new AppError(503, 'STREAM_NOT_CONFIGURED', 'Chat is not configured.');
+    const matrixOn = isMatrixConfigured();
+    if (!matrixOn && !isStreamConfigured()) {
+      throw new AppError(503, 'CHAT_NOT_CONFIGURED', 'Chat is not configured.');
+    }
     const { name, member_ids, avatar_url } = createGroupSchema.parse(req.body);
     const creatorId = req.user!.sub;
 
     const groupId = crypto.randomUUID();
     const channelId = `group-${groupId}`;
-    const channelCid = `messaging:${channelId}`;
+    const channelCid = matrixOn ? `matrix:${groupId}` : `messaging:${channelId}`;
     const allMemberIds = [...new Set([creatorId, ...member_ids])];
 
     // Verify all members exist and are active (single batch query — no N+1)
@@ -316,14 +422,16 @@ chatRouter.post('/groups', requireAuth, async (req: Request, res: Response, next
       throw new AppError(400, 'MEMBER_NOT_FOUND', `User ${missing} not found or inactive.`);
     }
 
-    // Upsert all members into Stream so they can receive messages (before DB/Stream channel writes)
-    const memberRows = await query<{ user_id: string; handle: string; display_name: string | null; avatar_url: string | null }>(
-      `SELECT user_id, handle, display_name, avatar_url FROM users WHERE user_id = ANY($1)`,
-      [allMemberIds],
-    );
-    await Promise.all(memberRows.map((u) => upsertStreamUser(u)));
+    // Upsert Stream users only when Stream messaging is still in use.
+    if (!matrixOn && isStreamConfigured()) {
+      const memberRows = await query<{ user_id: string; handle: string; display_name: string | null; avatar_url: string | null }>(
+        `SELECT user_id, handle, display_name, avatar_url FROM users WHERE user_id = ANY($1)`,
+        [allMemberIds],
+      );
+      await Promise.all(memberRows.map((u) => upsertStreamUser(u)));
+    }
 
-    // 1. Persist to DB first (can be compensated on Stream failure)
+    // 1. Persist to DB first (can be compensated on room failure)
     await withTransaction(async (client) => {
       await client.query(
         `INSERT INTO group_channels (group_id, channel_cid, name, description, avatar_url, created_by)
@@ -343,28 +451,59 @@ chatRouter.post('/groups', requireAuth, async (req: Request, res: Response, next
       );
     });
 
-    try {
-      await createGroupChannel(channelId, name, creatorId, member_ids, avatar_url);
-    } catch (streamErr) {
-      logger.error('stream', 'Group channel creation failed', {
-        err: streamErr instanceof Error ? streamErr.message : String(streamErr),
-        groupId,
-        channelId,
-      });
-      // Compensate: remove the DB rows since Stream channel doesn't exist
-      await query(`DELETE FROM group_channels WHERE group_id = $1`, [groupId]).catch(() => {});
-      throw new AppError(503, 'STREAM_ERROR', 'Failed to create group chat. Please try again.');
-    }
+    let matrixRoomId: string | null = null;
+    if (matrixOn) {
+      try {
+        const room = await createGroupRoom({
+          creatorId,
+          groupId,
+          name,
+          memberIds: member_ids,
+          avatarUrl: avatar_url,
+        });
+        matrixRoomId = room.room_id;
+        await query(
+          `UPDATE group_channels SET channel_cid = $2 WHERE group_id = $1`,
+          [groupId, room.room_id],
+        );
+      } catch (matrixErr) {
+        logger.error('matrix', 'Group room creation failed', {
+          err: matrixErr instanceof Error ? matrixErr.message : String(matrixErr),
+          groupId,
+        });
+        await query(`DELETE FROM group_channels WHERE group_id = $1`, [groupId]).catch(() => {});
+        throw new AppError(503, 'MATRIX_ERROR', 'Failed to create group chat. Please try again.');
+      }
+    } else {
+      try {
+        await createGroupChannel(channelId, name, creatorId, member_ids, avatar_url);
+      } catch (streamErr) {
+        logger.error('stream', 'Group channel creation failed', {
+          err: streamErr instanceof Error ? streamErr.message : String(streamErr),
+          groupId,
+          channelId,
+        });
+        await query(`DELETE FROM group_channels WHERE group_id = $1`, [groupId]).catch(() => {});
+        throw new AppError(503, 'STREAM_ERROR', 'Failed to create group chat. Please try again.');
+      }
 
-    try {
-      await ensureNativeGroupConversation(groupId, name, creatorId, allMemberIds, channelCid, avatar_url);
-    } catch (nativeErr) {
-      logger.warn('nativeChat', 'Native group conversation sync failed: ' + String(nativeErr));
+      try {
+        await ensureNativeGroupConversation(groupId, name, creatorId, allMemberIds, channelCid, avatar_url);
+      } catch (nativeErr) {
+        logger.warn('nativeChat', 'Native group conversation sync failed: ' + String(nativeErr));
+      }
     }
 
     res.status(201).json({
       ok: true,
-      data: { group_id: groupId, channel_cid: channelCid, channel_id: channelId, name, avatar_url: avatar_url ?? null },
+      data: {
+        group_id: groupId,
+        channel_cid: matrixRoomId ?? channelCid,
+        channel_id: matrixRoomId ?? channelId,
+        room_id: matrixRoomId,
+        name,
+        avatar_url: avatar_url ?? null,
+      },
     });
   } catch (err) {
     if (err instanceof z.ZodError) return next(new AppError(400, 'VALIDATION_ERROR', err.errors[0].message));

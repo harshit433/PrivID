@@ -9,6 +9,7 @@ import { initChatPubSub, type ChatWsEvent } from './chatPubSub';
 import { sendMessage, markRead, assertMember, addReaction, removeReaction } from './nativeChat';
 import { checkChatSendRate } from '../middleware/rateLimit';
 import { logger } from '../utils/logger';
+import { isMatrixConfigured } from './matrix';
 
 type Client = {
   ws: WebSocket;
@@ -74,6 +75,10 @@ export function attachChatWebSocket(server: Server): void {
   });
 
   wss.on('connection', async (ws, req) => {
+    if (isMatrixConfigured()) {
+      ws.close(1000, 'native_chat_retired');
+      return;
+    }
     const url = new URL(req.url ?? '', 'http://localhost');
     const token = url.searchParams.get('token');
     if (!token) {

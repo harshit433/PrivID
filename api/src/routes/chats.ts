@@ -26,6 +26,27 @@ import { isStreamConfigured, upsertStreamUser } from '../services/stream';
 export const chatsRouter = Router();
 chatsRouter.use(requireAuth);
 
+/** Native Postgres chat is retired when Matrix is configured. */
+async function assertNativeMessagingAllowed() {
+  const { isMatrixConfigured } = await import('../services/matrix');
+  if (isMatrixConfigured()) {
+    throw new AppError(
+      410,
+      'NATIVE_CHAT_RETIRED',
+      'Native chat is retired. Use Matrix (/chat/matrix-token, /chat/matrix/dm).',
+    );
+  }
+}
+
+chatsRouter.use(async (_req, _res, next) => {
+  try {
+    await assertNativeMessagingAllowed();
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
+
 chatsRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const data = await listConversations(req.user!.sub);

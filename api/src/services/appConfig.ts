@@ -87,7 +87,16 @@ export async function getAppConfig() {
       daily_free_calls: dailyFree,
       hold_minutes: holdMin,
     },
-    native_chat_enabled: await flagValue<boolean | string>('native_chat_enabled', true),
+    native_chat_enabled: await flagValue<boolean | string>('native_chat_enabled', false),
+    matrix_chat_enabled: await flagValue<boolean | string>('matrix_chat_enabled', true),
+    matrix_homeserver_url: process.env.MATRIX_PUBLIC_HOMESERVER_URL
+      ?? process.env.MATRIX_HOMESERVER_URL
+      ?? 'http://localhost:8008',
+    matrix_server_name: process.env.MATRIX_SERVER_NAME ?? 'trustroute.local',
+    matrix_push_gateway_url: process.env.MATRIX_PUSH_GATEWAY_URL
+      ?? (process.env.API_BASE_URL
+        ? `${process.env.API_BASE_URL.replace(/\/$/, '')}/_matrix/push/v1/notify`
+        : 'https://api-production-a71f.up.railway.app/_matrix/push/v1/notify'),
   };
 }
 

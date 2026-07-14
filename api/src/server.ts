@@ -55,6 +55,7 @@ import { isLivenessConfigured, isMockLiveness } from './services/liveness';
 import { isFirebaseConfigured } from './services/fcm';
 import { isDigilockerConfigured, isMockKyc } from './services/digilocker';
 import { digilockerCallbackRouter } from './routes/digilockerCallback';
+import { matrixPushRouter } from './routes/matrixPush';
 import { logger } from './utils/logger';
 
 const app = express();
@@ -212,6 +213,8 @@ app.get('/debug/digilocker-egress', async (_req, res) => {
 
 // DigiLocker OAuth return (Setu redirects here when SETU_DG_REDIRECT_URL points at the API).
 app.use('/digilocker', publicLimiter, digilockerCallbackRouter);
+// Matrix Push Gateway (Synapse → FCM). Unauthenticated by Matrix spec; rate-limited.
+app.use('/_matrix/push/v1', publicLimiter, matrixPushRouter);
 
 // ─── Debug: call system health (dev/staging only) ─────────────────────────────
 app.get('/debug/call-health', async (_req, res) => {

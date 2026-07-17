@@ -1,39 +1,11 @@
-# Dependencies
 node_modules/
-**/node_modules/
-
-# Environment files — NEVER commit these
-api/.env
-api/.env.production
-api/.env.local
-**/.env
-**/.env.production
-**/.env.local
-
-# JWT keys — NEVER commit these
-api/keys/
-**/keys/*.pem
-
-# 3DiVi SDK (large binary, not open source)
-threedivi-sdk/
-
-# Build output
-**/dist/
-**/build/
-**/*.js.map
-
-# Logs
-*.log
-npm-debug.log*
-
-# OS
+dist/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+keys/*.pem
+coverage/
 .DS_Store
-Thumbs.db
 
-# IDE
-.vscode/
-.idea/
-
-# Railway / Docker
-.railway/
-.railway-secrets/
+**/*.pem

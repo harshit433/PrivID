@@ -1,31 +1,30 @@
 {
-  "name": "trustroute-backend",
-  "version": "1.0.0",
+  "name": "trustroute-backend-v2",
+  "version": "2.0.0",
   "private": true,
   "workspaces": [
-    "api",
-    "business-api",
-    "worker",
-    "shared"
+    "packages/*",
+    "apps/*"
   ],
   "scripts": {
-    "dev": "concurrently \"npm run dev --workspace=api\" \"npm run dev --workspace=business-api\" \"npm run dev --workspace=worker\"",
-    "dev:business-api": "npm run dev --workspace=business-api",
-    "dev:api": "npm run dev --workspace=api",
-    "dev:worker": "npm run dev --workspace=worker",
-    "db:migrate": "npm run migrate --workspace=api",
-    "db:seed": "npm run seed --workspace=api",
-    "db:reset": "npm run migrate:reset --workspace=api",
-    "build": "npm run build --workspaces",
-    "docker:up": "docker compose up -d --build",
-    "docker:down": "docker compose down",
-    "docker:logs": "docker compose logs -f api",
-    "docker:shell": "docker compose exec api sh"
+    "build": "npm run build --workspace=@trustroute/core && npm run build --workspace=@trustroute/api && npm run build --workspace=@trustroute/worker",
+    "dev": "concurrently -n core,api,worker -c blue,green,magenta \"npm:dev:core\" \"npm:dev:api\" \"npm:dev:worker\"",
+    "dev:core": "npm run dev --workspace=@trustroute/core",
+    "dev:api": "npm run dev --workspace=@trustroute/api",
+    "dev:worker": "npm run dev --workspace=@trustroute/worker",
+    "db:generate": "npm run db:generate --workspace=@trustroute/core",
+    "db:migrate": "npm run db:migrate --workspace=@trustroute/core",
+    "db:seed": "npm run db:seed --workspace=@trustroute/core",
+    "db:reset": "npm run db:reset --workspace=@trustroute/core",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run"
   },
   "devDependencies": {
-    "concurrently": "^8.2.2"
+    "concurrently": "^9.1.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
   },
-  "dependencies": {
-    "firebase-admin": "^13.10.0"
+  "engines": {
+    "node": ">=20"
   }
 }

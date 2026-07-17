@@ -1,36 +1,21 @@
-# TrustRoute API (Linux)
-
-FROM node:20-bookworm-slim
-
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-  && rm -rf /var/lib/apt/lists/*
+# TrustRoute v2 API service (monorepo: builds @trustroute/core + @trustroute/api).
+# On boot it applies pending migrations (from src via tsx), seeds idempotent reference
+# data, then serves. A one-time production wipe is triggered by setting DB_RESET=true.
+FROM node:20-slim
 
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-COPY api/package.json ./api/
-COPY business-api/package.json ./business-api/
-COPY shared/package.json ./shared/
-COPY worker/package.json ./worker/
+# Install workspace deps (incl. dev deps: tsx/typescript are needed to build + migrate).
+COPY package*.json tsconfig.base.json ./
+COPY packages ./packages
+COPY apps ./apps
+RUN npm ci
 
-RUN npm ci --workspace=@trustroute/api --workspace=@trustroute/business-api --workspace=@trustroute/shared --include-workspace-root
+# Build core, then the API (worker is built in its own image).
+RUN npm run build --workspace=@trustroute/core \
+ && npm run build --workspace=@trustroute/api
 
-COPY shared ./shared
-COPY business-api ./business-api
-COPY api ./api
-COPY db ./db
-COPY docker/api-entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+ENV NODE_ENV=production
 
-WORKDIR /app
-RUN npm run build --workspace=@trustroute/shared
-
-WORKDIR /app/api
-RUN npm run build
-
-EXPOSE 3000
-
-ENTRYPOINT ["/entrypoint.sh"]
+# Railway injects PORT; the server binds 0.0.0.0:$PORT.
+CMD ["sh", "-c", "npm run db:migrate --workspace=@trustroute/core && npm run db:seed --workspace=@trustroute/core && node apps/api/dist/server.js"]

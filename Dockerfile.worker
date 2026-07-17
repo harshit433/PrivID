@@ -1,26 +1,18 @@
-FROM node:20-bookworm-slim
-
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-COPY package.json package-lock.json ./
-COPY worker/package.json ./worker/
-COPY shared/package.json ./shared/
-
-RUN npm ci --workspace=@trustroute/worker --workspace=@trustroute/shared --include-workspace-root
-
-COPY shared ./shared
-COPY worker ./worker
-COPY db ./db
+# TrustRoute v2 background worker (monorepo: builds @trustroute/core + @trustroute/worker).
+# Runs the BullMQ processors + cron scheduler. Migrations are owned by the API image, so
+# the worker only builds and runs.
+FROM node:20-slim
 
 WORKDIR /app
-RUN npm run build --workspace=@trustroute/shared
 
-WORKDIR /app/worker
-RUN npm run build
+COPY package*.json tsconfig.base.json ./
+COPY packages ./packages
+COPY apps ./apps
+RUN npm ci
 
-CMD ["node", "dist/index.js"]
+RUN npm run build --workspace=@trustroute/core \
+ && npm run build --workspace=@trustroute/worker
 
+ENV NODE_ENV=production
+
+CMD ["node", "apps/worker/dist/index.js"]

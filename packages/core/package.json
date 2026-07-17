@@ -1,0 +1,35 @@
+{
+  "name": "@trustroute/core",
+  "version": "2.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx src/db/migrate.ts",
+    "db:reset": "tsx src/db/migrate.ts --reset",
+    "db:seed": "tsx src/db/seed.ts",
+    "db:verify": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -q -f scripts/verify-schema.sql",
+    "db:studio": "drizzle-kit studio"
+  },
+  "dependencies": {
+    "bullmq": "^5.34.0",
+    "dotenv": "^16.4.7",
+    "drizzle-orm": "^0.36.4",
+    "ioredis": "^5.4.1",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^20.17.6",
+    "@types/pg": "^8.11.10",
+    "drizzle-kit": "^0.28.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

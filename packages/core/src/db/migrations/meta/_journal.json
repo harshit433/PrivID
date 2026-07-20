@@ -8,6 +8,20 @@
       "when": 1784193314893,
       "tag": "0000_baseline",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1784473647998,
+      "tag": "0001_perfect_kang",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784561128092,
+      "tag": "0002_yielding_prodigy",
+      "breakpoints": true
     }
   ]
 }

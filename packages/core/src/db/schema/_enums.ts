@@ -18,6 +18,8 @@ export const accountStatus = pgEnum('account_status', [
   'self_deleted',
 ]);
 export const appealStatus = pgEnum('appeal_status', ['submitted', 'in_review', 'restored', 'upheld', 'rejected']);
+// In-app approval requests (the "approve in your app instead of SMS OTP" flow).
+export const approvalStatus = pgEnum('approval_status', ['pending', 'approved', 'denied', 'expired']);
 export const discoveryMode = pgEnum('discovery_mode', ['public', 'private']);
 
 // Connections / reachability / calls

@@ -22,6 +22,8 @@ import { register as registerBusiness } from './business/business.routes';
 import { register as registerAdmin } from './admin/admin.routes';
 import { register as registerNotifications } from './notifications/notifications.routes';
 import { register as registerConfig } from './config/config.routes';
+import { register as registerAuthenticator } from './authenticator/authenticator.routes';
+import { register as registerApprovals } from './approvals/approvals.routes';
 import { register as registerSite } from './site/site.routes';
 import { register as registerSimulation } from './simulation/simulation.routes';
 import { registerCompat } from './_compat';
@@ -52,6 +54,8 @@ export function registerModules(app: Express): void {
   registerAdmin(app);
   registerNotifications(app);
   registerConfig(app);
+  registerAuthenticator(app);
+  registerApprovals(app);
   registerSite(app);
   // P8 — dev-only simulation/ML harness (self-guards on ENABLE_SIMULATION)
   registerSimulation(app);

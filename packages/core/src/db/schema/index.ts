@@ -21,3 +21,5 @@ export * from './business';
 export * from './referrals';
 export * from './moderation';
 export * from './system';
+export * from './authenticator';
+export * from './approvals';

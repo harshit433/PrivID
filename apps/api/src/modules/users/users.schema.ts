@@ -21,6 +21,11 @@ export const updateProfileBody = z
 
 export const setAvatarBody = z.object({ avatarUrl: z.string().url().max(1024).nullable() });
 
+export const uploadAvatarBody = z.object({
+  imageBase64: z.string().min(1),
+  contentType: z.enum(['image/jpeg', 'image/png', 'image/webp']).default('image/jpeg'),
+});
+
 export const setStatusBody = z.object({
   statusText: z.string().trim().max(140).nullish(),
   statusEmoji: z.string().trim().max(16).nullish(),

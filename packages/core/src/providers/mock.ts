@@ -106,6 +106,10 @@ export const mockStorageProvider: StorageProvider = {
     const base = config.S3_PUBLIC_BASE_URL ?? 'https://mock-cdn.trustroute.dev';
     return { uploadUrl: `${base}/upload/${input.key}`, key: input.key, publicUrl: `${base}/${input.key}` };
   },
+  async putObject(input) {
+    // No real store in mock — callers should fall back to a data URL when needed.
+    return { publicUrl: mockStorageProvider.publicUrl(input.key) };
+  },
   publicUrl(key) {
     const base = config.S3_PUBLIC_BASE_URL ?? 'https://mock-cdn.trustroute.dev';
     return `${base}/${key}`;

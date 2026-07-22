@@ -58,4 +58,6 @@ export const setHandleBody = z.object({
 export const completeBody = z.object({
   sessionId,
   pin: pinSchema.optional(),
+  displayName: z.string().trim().min(1).max(80).optional(),
+  handle: handleSchema.optional(),
 });

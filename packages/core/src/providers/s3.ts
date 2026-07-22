@@ -63,6 +63,18 @@ export const s3StorageProvider: StorageProvider = {
     };
   },
 
+  async putObject(input) {
+    await getClient().send(
+      new PutObjectCommand({
+        Bucket: bucket(),
+        Key: input.key,
+        Body: input.body,
+        ContentType: input.contentType,
+      }),
+    );
+    return { publicUrl: objectPublicUrl(input.key) };
+  },
+
   publicUrl(key: string): string {
     return objectPublicUrl(key);
   },

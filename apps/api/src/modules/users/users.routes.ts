@@ -8,6 +8,7 @@ import { asyncHandler, sendOk, validate, requireAuth, apiLimiter } from '@trustr
 import {
   updateProfileBody,
   setAvatarBody,
+  uploadAvatarBody,
   setStatusBody,
   updateSettingsBody,
   changeHandleBody,
@@ -32,6 +33,19 @@ router.patch(
   validate({ body: updateProfileBody }),
   asyncHandler(async (req, res) => {
     sendOk(res, await users.updateProfile(req.user!.sub, req.valid.body as Record<string, unknown>));
+  }),
+);
+
+router.post(
+  '/me/avatar',
+  validate({ body: uploadAvatarBody }),
+  asyncHandler(async (req, res) => {
+    const { imageBase64, contentType } = req.valid.body as {
+      imageBase64: string;
+      contentType: 'image/jpeg' | 'image/png' | 'image/webp';
+    };
+    const profile = await users.uploadAvatarBase64(req.user!.sub, imageBase64, contentType);
+    sendOk(res, profile);
   }),
 );
 

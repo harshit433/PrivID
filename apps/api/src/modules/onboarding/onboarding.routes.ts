@@ -133,8 +133,12 @@ router.post(
   '/complete',
   validate({ body: completeBody }),
   asyncHandler(async (req, res) => {
-    const { sessionId, pin } = req.valid.body as { sessionId: string; pin?: string };
-    sendOk(res, await onboarding.complete(sessionId, pin), { status: 201 });
+    const { sessionId, pin, displayName } = req.valid.body as {
+      sessionId: string;
+      pin?: string;
+      displayName?: string;
+    };
+    sendOk(res, await onboarding.complete(sessionId, pin, displayName), { status: 201 });
   }),
 );
 

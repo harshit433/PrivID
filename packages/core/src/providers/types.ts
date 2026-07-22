@@ -115,6 +115,8 @@ export interface PresignedUpload {
 export interface StorageProvider {
   readonly configured: boolean;
   presignUpload(input: { key: string; contentType: string; maxBytes?: number }): Promise<PresignedUpload>;
+  /** Server-side put (avatars, etc). Optional on older mocks; prefer over client presign when available. */
+  putObject(input: { key: string; body: Buffer; contentType: string }): Promise<{ publicUrl: string }>;
   publicUrl(key: string): string;
   delete(key: string): Promise<void>;
 }

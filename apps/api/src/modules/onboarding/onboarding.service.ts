@@ -13,6 +13,7 @@ import {
   appError,
   AppError,
   config,
+  enqueue,
   getKycProvider,
   getLivenessProvider,
   logger,
@@ -29,6 +30,7 @@ import {
   handleMatchesLegalName,
   validateHandleForSession,
 } from './onboarding.handles';
+import { persistVerificationScore } from '../../lib/trustScore';
 
 /** Branches that may advance past KYC, keyed by session purpose. */
 const PROCEEDABLE: Record<string, Set<IdentityBranch>> = {
@@ -316,7 +318,7 @@ export async function setHandle(sessionId: string, handle: string, displayName?:
   return { ...(await enrichView(updated)), available: true };
 }
 
-export async function complete(sessionId: string, pin?: string) {
+export async function complete(sessionId: string, pin?: string, displayName?: string) {
   const s = await loadActive(sessionId);
   expect(s, ['matched', 'liveness_verified']);
 
@@ -344,6 +346,12 @@ export async function complete(sessionId: string, pin?: string) {
   if (!s.selectedHandle) throw appError('ONBOARDING_STATE_INVALID', 'Please choose a handle first.');
   await validateHandleForSession(s, s.selectedHandle);
 
+  const resolvedDisplayName =
+    displayName?.trim() ||
+    s.pendingDisplayName?.trim() ||
+    s.legalName.trim() ||
+    s.selectedHandle;
+
   const { user } = await repo.createAccount({
     existingIdentityId: branch === 'self_deleted' ? s.identityId : null,
     legalName: s.legalName,
@@ -352,12 +360,30 @@ export async function complete(sessionId: string, pin?: string) {
     provider: 'setu',
     providerRef: s.digilockerProviderRef,
     handle: s.selectedHandle,
-    displayName: s.pendingDisplayName ?? null,
+    displayName: resolvedDisplayName,
     pinHash,
   });
 
-  const session = await issueSession(user);
+  await persistVerificationScore(user.userId, 'onboarding_complete').catch((err) => {
+    logger.warn('onboarding', 'trust persist failed', {
+      userId: user.userId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  });
+  await enqueue(
+    'trust-recompute',
+    { user_id: user.userId, reason: 'onboarding_complete' },
+    { jobId: `trust-${user.userId}-onboarding` },
+  ).catch(() => {});
+
+  const fresh = (await usersRepo.findById(user.userId)) ?? user;
+  const session = await issueSession(fresh);
   await repo.markCompleted(sessionId);
-  logger.info('onboarding', 'account created', { userId: user.userId, handle: user.handle, branch });
-  return { ...session, user: publicUser(user) };
+  logger.info('onboarding', 'account created', {
+    userId: fresh.userId,
+    handle: fresh.handle,
+    branch,
+    trustScore: fresh.trustScore,
+  });
+  return { ...session, user: publicUser(fresh) };
 }

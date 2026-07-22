@@ -3,9 +3,15 @@
  * the transactional home for turning a verified session into an identity + user.
  * Ephemeral face-match images live on the session row and are purged on completion.
  */
-import { db, onboardingSessions, identities, users, eq, and, sql } from '@trustroute/core';
+import { db, onboardingSessions, identities, users, trustFactors, eq, and, sql } from '@trustroute/core';
 import type { IdentityRow } from '../identity/identity.repository';
 import type { UserRow } from '../users/users.repository';
+
+const ONBOARDING_FACTORS = [
+  { factorType: 'govt_id_verified', provider: 'setu', scoreDelta: 30 },
+  { factorType: 'liveness_check', provider: 'onboarding', scoreDelta: 25 },
+  { factorType: 'device_integrity', provider: 'onboarding', scoreDelta: 10 },
+] as const;
 
 export type OnboardingSession = typeof onboardingSessions.$inferSelect;
 
@@ -179,6 +185,7 @@ export async function createAccount(input: {
         displayName: input.displayName,
         legalName: input.legalName,
         trustTier: 'verified',
+        trustScore: 65, // govt 30 + liveness 25 + device 10; refined by persistVerificationScore
         kycStatus: 'verified',
         kycProvider: input.provider,
         kycVerifiedAt: sql`now()`,
@@ -189,6 +196,18 @@ export async function createAccount(input: {
         pinSetAt: input.pinHash ? sql`now()` : null,
       })
       .returning();
+
+    await tx.insert(trustFactors).values(
+      ONBOARDING_FACTORS.map((f) => ({
+        userId: user!.userId,
+        factorType: f.factorType,
+        status: 'completed' as const,
+        provider: f.provider,
+        scoreDelta: f.scoreDelta,
+        isLatest: true,
+        verifiedAt: sql`now()`,
+      })),
+    );
 
     await tx
       .update(identities)

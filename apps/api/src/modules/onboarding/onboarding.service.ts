@@ -134,7 +134,9 @@ export async function digilockerCallback(sessionId: string) {
 
   const kyc = getKycProvider();
   const status = await kyc.getStatus(requestId);
-  if (status.status === 'pending') throw appError('KYC_FAILED', 'Identity verification is still pending.');
+  if (status.status === 'pending') {
+    return { ...view(s), pending: true };
+  }
   if (status.status !== 'verified') throw appError('KYC_FAILED');
 
   const identityDoc = await kyc.fetchIdentity(requestId);

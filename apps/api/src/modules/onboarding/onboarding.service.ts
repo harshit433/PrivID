@@ -174,10 +174,23 @@ export async function digilockerCallback(sessionId: string) {
 
 export async function livenessStart(sessionId: string) {
   const s = await loadActive(sessionId);
-  expect(s, ['digilocker_verified', 'liveness_started']);
   const liveness = getLivenessProvider();
-  await repo.patch(sessionId, { status: 'liveness_started', livenessProviderRef: `live_${crypto.randomBytes(6).toString('hex')}` });
-  return { available: liveness.available(), mock: liveness.mock };
+
+  if (s.status === 'liveness_started' && s.livenessProviderRef) {
+    return {
+      providerRef: s.livenessProviderRef,
+      available: liveness.available(),
+      mock: liveness.mock,
+    };
+  }
+
+  expect(s, ['digilocker_verified']);
+  const providerRef = `live_${crypto.randomBytes(6).toString('hex')}`;
+  await repo.patch(sessionId, {
+    status: 'liveness_started',
+    livenessProviderRef: providerRef,
+  });
+  return { providerRef, available: liveness.available(), mock: liveness.mock };
 }
 
 export async function livenessComplete(sessionId: string, selfieB64: string, docPhotoB64?: string) {

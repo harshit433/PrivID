@@ -208,7 +208,8 @@ export async function livenessComplete(sessionId: string, selfieB64: string) {
   if (!live.pass) {
     throw appError(
       'LIVENESS_FAILED',
-      'We couldn’t confirm your face. Use good lighting, hold steady, and try again.',
+      live.reason ??
+        'We couldn’t confirm your face. Use good lighting, hold steady, and try again.',
     );
   }
 

@@ -30,6 +30,7 @@ export interface KycProvider {
 export interface LivenessResult {
   pass: boolean;
   score: number;
+  reason?: string;
 }
 export interface FaceMatchResult {
   match: boolean;

@@ -9,7 +9,10 @@ import {logger} from '../logger';
 import type {FaceMatchResult, LivenessProvider, LivenessResult} from './types';
 
 const JOB = 'provider:liveness:luxand';
-const LIVENESS_URL = 'https://api.luxand.cloud/photo/liveness/v2';
+/** v2 rejects many valid mobile selfies (face near frame edge, small IPD). v1 scores reliably. */
+const LIVENESS_URL =
+  (config.LIVENESS_BASE_URL ?? '').trim() ||
+  'https://api.luxand.cloud/photo/liveness';
 const SIMILARITY_URL = 'https://api.luxand.cloud/photo/similarity';
 
 function token(): string {
@@ -33,6 +36,60 @@ function faceMatchThreshold(): number {
   const raw = config.FACE_MATCH_THRESHOLD;
   if (!Number.isFinite(raw) || raw <= 0) return 0.7;
   return raw > 1 ? raw / 100 : raw;
+}
+
+function friendlyLivenessMessage(raw?: string): string | undefined {
+  if (!raw) return undefined;
+  const msg = raw.toLowerCase();
+  if (msg.includes('too close') && msg.includes('border')) {
+    return 'Keep your face centered in the oval with a little space around it.';
+  }
+  if (msg.includes('interpupillary') || msg.includes('too small')) {
+    return 'Move a little closer so your face fills the oval.';
+  }
+  if (msg.includes('issues with the image') || msg.includes('no face')) {
+    return 'We couldn’t detect your face clearly. Use good lighting and try again.';
+  }
+  return raw.replace(/^Error checking liveness:/i, '').trim() || undefined;
+}
+
+function parseLivenessPayload(data: Record<string, unknown>): {
+  pass: boolean;
+  score: number;
+  reason?: string;
+} {
+  const status = String(data.status ?? '').toLowerCase();
+  const message =
+    typeof data.message === 'string'
+      ? friendlyLivenessMessage(data.message)
+      : typeof data.error === 'string'
+        ? friendlyLivenessMessage(data.error)
+        : undefined;
+
+  if (status === 'failure') {
+    return {
+      pass: false,
+      score: 0,
+      reason: message ?? 'Face verification did not pass. Please try again.',
+    };
+  }
+
+  let score = 0;
+  if (typeof data.score === 'number') score = data.score;
+  else if (typeof data.probability === 'number') score = data.probability;
+  else if (typeof data.liveness === 'number') score = data.liveness;
+  else if (typeof data.confidence === 'number') score = data.confidence;
+  if (score > 1) score = score / 100;
+
+  const resultStr = String(data.result ?? '').toLowerCase();
+  const realByString = resultStr === 'real' || resultStr === 'live';
+  const pass = score > 0 ? score >= livenessThreshold() : realByString;
+
+  return {
+    pass,
+    score: score || (pass ? 1 : 0),
+    reason: pass ? undefined : message,
+  };
 }
 
 async function postMultipart(
@@ -81,21 +138,26 @@ export const luxandLivenessProvider: LivenessProvider = {
 
   async check(selfieBase64: string): Promise<LivenessResult> {
     const image = decodeImage(selfieBase64);
+    if (image.length < 1024) {
+      return {
+        pass: false,
+        score: 0,
+        reason: 'The captured selfie was empty. Please try again.',
+      };
+    }
+
     const data = (await postMultipart(LIVENESS_URL, [
       {name: 'photo', buffer: image, filename: 'selfie.jpg'},
     ])) as Record<string, unknown>;
 
-    let score = 0;
-    if (typeof data.score === 'number') score = data.score;
-    else if (typeof data.probability === 'number') score = data.probability;
-    else if (typeof data.liveness === 'number') score = data.liveness;
-
-    const resultStr = String(data.result ?? data.status ?? '').toLowerCase();
-    const realByString = resultStr === 'real' || resultStr === 'live';
-    const pass = score > 0 ? score >= livenessThreshold() : realByString;
-
-    logger.info(JOB, 'liveness check', {score, pass});
-    return {pass, score: score || (pass ? 1 : 0)};
+    const parsed = parseLivenessPayload(data);
+    logger.info(JOB, 'liveness check', {
+      score: parsed.score,
+      pass: parsed.pass,
+      status: data.status,
+      reason: parsed.reason,
+    });
+    return parsed;
   },
 
   async compareFaces(aBase64: string, bBase64: string): Promise<FaceMatchResult> {

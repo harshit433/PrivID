@@ -84,6 +84,10 @@ const envSchema = z.object({
   SETU_DG_CLIENT_SECRET: z.string().optional(),
   SETU_DG_PRODUCT_INSTANCE_ID: z.string().optional(),
   SETU_DG_REDIRECT_URL: z.string().optional(),
+  // India egress proxy — Setu geo-fences to India IPs; Railway is in Singapore, so
+  // real DigiLocker calls route through a Mumbai proxy when this is set.
+  SETU_DG_PROXY_BASE_URL: z.string().optional(),
+  SETU_DG_PROXY_SECRET: z.string().optional(),
 
   LIVENESS_PROVIDER: z.string().optional(),
   LIVENESS_API_KEY: z.string().optional(),

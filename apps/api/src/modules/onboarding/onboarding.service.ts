@@ -107,7 +107,15 @@ export async function digilockerStart(sessionId: string) {
   const s = await loadActive(sessionId);
   expect(s, ['device_checked', 'digilocker_started']);
   const kyc = getKycProvider();
-  const redirectUrl = `${config.API_BASE_URL ?? 'http://localhost:3000'}/onboarding/digilocker/return`;
+  // Public base for the DigiLocker return URL. The real Setu provider prefers
+  // SETU_DG_REDIRECT_URL; this fallback must never be localhost in production, so
+  // derive it from Railway's injected public domain when API_BASE_URL is unset.
+  const publicBase =
+    config.API_BASE_URL ??
+    (config.RAILWAY_PUBLIC_DOMAIN
+      ? `https://${config.RAILWAY_PUBLIC_DOMAIN}`
+      : 'http://localhost:3000');
+  const redirectUrl = `${publicBase}/onboarding/digilocker/return`;
   const { requestId, authUrl } = await kyc.createRequest(redirectUrl);
   await repo.patch(sessionId, { status: 'digilocker_started', digilockerProviderRef: requestId });
   return { authUrl, providerRef: requestId, mock: kyc.mock };

@@ -8,6 +8,7 @@
 import { config } from '../config';
 import { logger } from '../logger';
 import * as mock from './mock';
+import { setuKycProvider } from './setu';
 import type {
   KycProvider,
   LivenessProvider,
@@ -59,8 +60,8 @@ export function telephonyIsMock(): boolean {
 // ── Getters (real impls plugged in per phase) ─────────────────────────────────
 export const getKycProvider = memo<KycProvider>(() => {
   if (kycIsMock()) return mock.mockKycProvider;
-  logger.warn('provider:kyc', 'real Setu provider not yet wired — using mock');
-  return mock.mockKycProvider;
+  logger.info('provider:kyc', 'using real Setu DigiLocker provider');
+  return setuKycProvider;
 });
 
 export const getLivenessProvider = memo<LivenessProvider>(() => {

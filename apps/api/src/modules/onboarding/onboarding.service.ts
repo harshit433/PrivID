@@ -11,6 +11,7 @@
 import crypto from 'crypto';
 import {
   appError,
+  AppError,
   config,
   getKycProvider,
   getLivenessProvider,
@@ -23,6 +24,11 @@ import { classify } from '../identity/identity.service';
 import type { IdentityBranch } from '../identity/identity.service';
 import * as usersRepo from '../users/users.repository';
 import { issueSession, publicUser } from '../auth/auth.service';
+import {
+  buildHandleCandidates,
+  handleMatchesLegalName,
+  validateHandleForSession,
+} from './onboarding.handles';
 
 /** Branches that may advance past KYC, keyed by session purpose. */
 const PROCEEDABLE: Record<string, Set<IdentityBranch>> = {
@@ -243,6 +249,45 @@ export async function match(sessionId: string) {
 export async function checkHandle(handle: string) {
   const taken = await repo.handleTaken(handle);
   return { handle: handle.toLowerCase(), available: !taken };
+}
+
+/** GET /onboarding/handle/check — live availability for the mobile debounced input. */
+export async function checkHandleForSession(sessionId: string, rawHandle: string) {
+  const s = await loadActive(sessionId);
+  try {
+    const handle = await validateHandleForSession(s, rawHandle);
+    await repo.patch(sessionId, { selectedHandle: handle });
+    return { handle, available: true, reason: null, nameLocked: true };
+  } catch (err) {
+    if (err instanceof AppError && ['HANDLE_TAKEN', 'HANDLE_INVALID'].includes(err.code)) {
+      return {
+        handle: rawHandle.trim().toLowerCase().replace(/^@/, ''),
+        available: false,
+        reason: err.message,
+        nameLocked: true,
+      };
+    }
+    throw err;
+  }
+}
+
+/** GET /onboarding/handle/suggest — name-based suggestions for onboarding. */
+export async function suggestHandles(sessionId: string) {
+  const s = await loadActive(sessionId);
+  if (!s.legalName) {
+    throw appError('ONBOARDING_STATE_INVALID', 'Verify your identity before choosing a handle.');
+  }
+  const candidates = buildHandleCandidates(s.legalName)
+    .map((h) => h.replace(/_/g, '.'))
+    .filter((h) => handleMatchesLegalName(h, s.legalName!));
+  const suggestions: string[] = [];
+  for (const candidate of [...new Set(candidates)]) {
+    if (suggestions.length >= 5) break;
+    if (!(await repo.handleTaken(candidate))) {
+      suggestions.push(candidate);
+    }
+  }
+  return { suggestions };
 }
 
 export async function setHandle(sessionId: string, handle: string, displayName?: string) {

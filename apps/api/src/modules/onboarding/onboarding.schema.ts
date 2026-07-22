@@ -34,6 +34,16 @@ export const livenessCompleteBody = z.object({
 
 export const checkHandleBody = z.object({ handle: handleSchema });
 
+/** Query strings stay snake_case — only JSON bodies are camelCased. */
+export const handleCheckQuery = z.object({
+  session_id: sessionId,
+  handle: z.string().min(1),
+});
+
+export const sessionIdQuery = z.object({
+  session_id: sessionId,
+});
+
 export const setHandleBody = z.object({
   sessionId,
   handle: handleSchema,

@@ -10,6 +10,8 @@ import {
   digilockerCallbackBody,
   livenessCompleteBody,
   checkHandleBody,
+  handleCheckQuery,
+  sessionIdQuery,
   setHandleBody,
   completeBody,
 } from './onboarding.schema';
@@ -81,6 +83,27 @@ router.post(
   asyncHandler(async (req, res) => {
     const { handle } = req.valid.body as { handle: string };
     sendOk(res, await onboarding.checkHandle(handle));
+  }),
+);
+
+router.get(
+  '/handle/check',
+  validate({ query: handleCheckQuery }),
+  asyncHandler(async (req, res) => {
+    const { session_id: sessionId, handle } = req.valid.query as {
+      session_id: string;
+      handle: string;
+    };
+    sendOk(res, await onboarding.checkHandleForSession(sessionId, handle));
+  }),
+);
+
+router.get(
+  '/handle/suggest',
+  validate({ query: sessionIdQuery }),
+  asyncHandler(async (req, res) => {
+    const { session_id: sessionId } = req.valid.query as { session_id: string };
+    sendOk(res, await onboarding.suggestHandles(sessionId));
   }),
 );
 

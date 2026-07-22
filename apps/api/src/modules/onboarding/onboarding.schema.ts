@@ -30,7 +30,6 @@ export const digilockerCallbackBody = z.object({
 export const livenessCompleteBody = z.object({
   sessionId,
   selfieB64: z.string().min(1, 'A selfie image is required.'),
-  docPhotoB64: z.string().optional(),
 });
 
 export const checkHandleBody = z.object({ handle: handleSchema });

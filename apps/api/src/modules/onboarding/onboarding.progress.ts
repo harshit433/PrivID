@@ -39,6 +39,7 @@ export function computeNextStep(session: OnboardingSession): OnboardingNextStep 
       return 'liveness';
 
     case 'liveness_verified':
+    case 'matched':
       return nextAfterLiveness(session);
 
     default:

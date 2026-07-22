@@ -2,7 +2,7 @@
  * Onboarding service: the signup / recovery state machine.
  *
  *   start → device_checked → digilocker_started → digilocker_verified
- *         → liveness_started → liveness_verified → completed
+ *         → liveness_started → matched → completed
  *
  * DigiLocker (KYC) and liveness run behind provider abstractions, so the whole flow
  * is exercisable end-to-end against mocks. Completion mints an identity + user and
@@ -193,25 +193,50 @@ export async function livenessStart(sessionId: string) {
   return { providerRef, available: liveness.available(), mock: liveness.mock };
 }
 
-export async function livenessComplete(sessionId: string, selfieB64: string, docPhotoB64?: string) {
+export async function livenessComplete(sessionId: string, selfieB64: string) {
   const s = await loadActive(sessionId);
-  expect(s, ['liveness_started', 'digilocker_verified']);
+
+  // Idempotent — client may retry after we already verified.
+  if (s.status === 'matched' || s.status === 'liveness_verified') {
+    return { ...view(s), livenessScore: undefined };
+  }
+
+  expect(s, ['liveness_started']);
   const liveness = getLivenessProvider();
 
   const live = await liveness.check(selfieB64);
-  if (!live.pass) throw appError('LIVENESS_FAILED');
-
-  const reference = docPhotoB64 ?? s.docPhotoB64;
-  if (reference) {
-    const match = await liveness.compareFaces(reference, selfieB64);
-    if (!match.match) throw appError('LIVENESS_FAILED', 'Your selfie did not match your ID photo.');
+  if (!live.pass) {
+    throw appError(
+      'LIVENESS_FAILED',
+      'We couldn’t confirm your face. Use good lighting, hold steady, and try again.',
+    );
   }
 
+  // Face-to-document match was removed — branch is resolved at DigiLocker.
   const updated = await repo.patch(sessionId, {
-    status: 'liveness_verified',
-    selfieB64: null, // don't retain the raw selfie past the check
+    status: 'matched',
+    docPhotoB64: null,
+    selfieB64: null,
   });
   return { ...view(updated), livenessScore: live.score };
+}
+
+/** Kept for older clients resuming at liveness_verified. No face compare — identity branch only. */
+export async function match(sessionId: string) {
+  const s = await loadActive(sessionId);
+  if (s.status === 'matched') {
+    return view(s);
+  }
+  expect(s, ['liveness_verified', 'liveness_started']);
+  if (!s.identityId || !s.legalName) {
+    throw appError('ONBOARDING_STATE_INVALID', 'Verify with DigiLocker before continuing.');
+  }
+  const updated = await repo.patch(sessionId, {
+    status: 'matched',
+    docPhotoB64: null,
+    selfieB64: null,
+  });
+  return view(updated);
 }
 
 export async function checkHandle(handle: string) {
@@ -221,7 +246,7 @@ export async function checkHandle(handle: string) {
 
 export async function setHandle(sessionId: string, handle: string, displayName?: string) {
   const s = await loadActive(sessionId);
-  expect(s, ['liveness_verified', 'digilocker_verified']);
+  expect(s, ['matched', 'liveness_verified', 'digilocker_verified']);
   if (await repo.handleTaken(handle)) throw appError('HANDLE_TAKEN');
   const updated = await repo.patch(sessionId, {
     selectedHandle: handle.toLowerCase(),
@@ -232,7 +257,7 @@ export async function setHandle(sessionId: string, handle: string, displayName?:
 
 export async function complete(sessionId: string, pin?: string) {
   const s = await loadActive(sessionId);
-  expect(s, ['liveness_verified']);
+  expect(s, ['matched', 'liveness_verified']);
 
   const branch = (s.branch ?? 'new') as IdentityBranch;
   const proceedable = (PROCEEDABLE[s.purpose] ?? PROCEEDABLE.signup!).has(branch);

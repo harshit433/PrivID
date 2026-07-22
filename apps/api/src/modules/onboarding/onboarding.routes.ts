@@ -58,12 +58,20 @@ router.post(
   '/liveness/complete',
   validate({ body: livenessCompleteBody }),
   asyncHandler(async (req, res) => {
-    const { sessionId, selfieB64, docPhotoB64 } = req.valid.body as {
+    const { sessionId, selfieB64 } = req.valid.body as {
       sessionId: string;
       selfieB64: string;
-      docPhotoB64?: string;
     };
-    sendOk(res, await onboarding.livenessComplete(sessionId, selfieB64, docPhotoB64));
+    sendOk(res, await onboarding.livenessComplete(sessionId, selfieB64));
+  }),
+);
+
+router.post(
+  '/match',
+  validate({ body: sessionBody }),
+  asyncHandler(async (req, res) => {
+    const { sessionId } = req.valid.body as { sessionId: string };
+    sendOk(res, await onboarding.match(sessionId));
   }),
 );
 

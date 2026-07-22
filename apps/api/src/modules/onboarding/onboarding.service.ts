@@ -18,6 +18,7 @@ import {
 } from '@trustroute/core';
 import * as repo from './onboarding.repository';
 import type { OnboardingSession } from './onboarding.repository';
+import { computeNextStep } from './onboarding.progress';
 import { classify } from '../identity/identity.service';
 import type { IdentityBranch } from '../identity/identity.service';
 import * as usersRepo from '../users/users.repository';
@@ -82,7 +83,9 @@ function view(s: OnboardingSession) {
     branch: s.branch,
     legalName: s.legalName,
     selectedHandle: s.selectedHandle,
+    identityId: s.identityId,
     expiresAt: s.expiresAt,
+    nextStep: computeNextStep(s),
   };
 }
 
@@ -128,7 +131,18 @@ export async function digilockerStart(sessionId: string) {
 
 export async function digilockerCallback(sessionId: string) {
   const s = await loadActive(sessionId);
-  expect(s, ['digilocker_started', 'digilocker_verified']);
+
+  // Idempotent — client may poll after we already verified.
+  if (
+    s.status === 'digilocker_verified' ||
+    s.status === 'liveness_started' ||
+    s.status === 'liveness_verified' ||
+    s.status === 'matched'
+  ) {
+    return { ...view(s), pending: false };
+  }
+
+  expect(s, ['digilocker_started']);
   const requestId = s.digilockerProviderRef;
   if (!requestId) throw appError('ONBOARDING_STATE_INVALID', 'DigiLocker was not started for this session.');
 

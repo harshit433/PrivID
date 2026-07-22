@@ -38,6 +38,10 @@ digilockerReturnRouter.get('/return', (req: Request, res: Response) => {
     `trustroute://digilocker/done?success=${encodeURIComponent(failed ? 'false' : 'true')}` +
     (id ? `&id=${encodeURIComponent(id)}` : '');
 
+  const successActions = succeeded
+    ? `<p style="margin-top:1rem;font-size:13px;color:#16a34a">Switch back to TrustRoute — verification is finishing automatically.</p>`
+    : `<a href="${escapeHtml(deep)}">Open TrustRoute</a>`;
+
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
   res.send(`<!doctype html>
@@ -65,13 +69,12 @@ digilockerReturnRouter.get('/return', (req: Request, res: Response) => {
     <div class="brand">TrustRoute</div>
     <h1>${escapeHtml(title)}</h1>
     <p>${escapeHtml(body)}</p>
-    <a href="${escapeHtml(deep)}">Open TrustRoute</a>
+    ${successActions}
   </div>
   <script>
     (function(){
       var payload={type:'digilocker_callback',success:${failed ? 'false' : 'true'},id:${JSON.stringify(id || null)},errCode:${JSON.stringify(errCode || null)},errMessage:${JSON.stringify(errMessage || null)}};
       try{if(window.ReactNativeWebView&&window.ReactNativeWebView.postMessage){window.ReactNativeWebView.postMessage(JSON.stringify(payload));}}catch(e){}
-      ${!failed ? `setTimeout(function(){try{location.href=${JSON.stringify(deep)};}catch(e){}},400);` : ''}
     })();
   </script>
 </body>

@@ -70,6 +70,10 @@ async function setuRequest<T>(
   if (cfg.proxySecret) {
     headers['x-proxy-secret'] = cfg.proxySecret;
   }
+  // ngrok free tier returns an HTML interstitial unless this header is set.
+  if (/ngrok(-free)?\.app/i.test(cfg.baseUrl)) {
+    headers['ngrok-skip-browser-warning'] = '1';
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 25_000);
@@ -117,6 +121,11 @@ async function setuRequest<T>(
       host: cfg.baseUrl,
       clientIdPrefix: cfg.clientId.slice(0, 8),
     });
+    if (res.status === 403 || /403|forbidden|geo|blocked/i.test(String(detail))) {
+      throw new Error(
+        'DigiLocker is unavailable from this server region. Configure SETU_DG_PROXY_BASE_URL.',
+      );
+    }
     throw new Error(String(detail));
   }
   return data as T;

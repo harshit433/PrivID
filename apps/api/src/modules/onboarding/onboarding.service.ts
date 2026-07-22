@@ -116,9 +116,14 @@ export async function digilockerStart(sessionId: string) {
       ? `https://${config.RAILWAY_PUBLIC_DOMAIN}`
       : 'http://localhost:3000');
   const redirectUrl = `${publicBase}/onboarding/digilocker/return`;
-  const { requestId, authUrl } = await kyc.createRequest(redirectUrl);
-  await repo.patch(sessionId, { status: 'digilocker_started', digilockerProviderRef: requestId });
-  return { authUrl, providerRef: requestId, mock: kyc.mock };
+  try {
+    const { requestId, authUrl } = await kyc.createRequest(redirectUrl);
+    await repo.patch(sessionId, { status: 'digilocker_started', digilockerProviderRef: requestId });
+    return { authUrl, providerRef: requestId, mock: kyc.mock };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'DigiLocker request failed.';
+    throw appError('SERVICE_UNAVAILABLE', msg.includes('DigiLocker') ? msg : `DigiLocker is unavailable: ${msg}`);
+  }
 }
 
 export async function digilockerCallback(sessionId: string) {

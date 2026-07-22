@@ -28,10 +28,12 @@ import { requireBusiness } from '../business/business.guard';
 import { counterQrBody, qrTokenBody } from '../business/business.schema';
 
 // ── API-key mint (business-scan) ──────────────────────────────────────────────
+// Auth only on this route — do not `use(requireBusiness)` on a /subscriptions
+// router, or every consumer JWT call (inbox, etc.) would fail with "API key required".
 const counterQrRouter = Router();
-counterQrRouter.use(requireBusiness);
 counterQrRouter.post(
   '/counter-qr',
+  requireBusiness,
   validate({ body: counterQrBody }),
   asyncHandler(async (req, res) => {
     const { channelId } = req.valid.body as { channelId: string };

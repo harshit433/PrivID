@@ -3,7 +3,7 @@
  * "call" POST doesn't double-ring. Everything else is a state transition on a call the
  * caller participates in.
  */
-import { Router, type Express } from 'express';
+import { Router, type Express, type Request, type Response } from 'express';
 import { asyncHandler, sendOk, sendPage, validate, requireAuth, apiLimiter, idempotency } from '@trustroute/core';
 import { initiateBody, declineBody, qualityBody, listQuery, callIdParam } from './calls.schema';
 import * as calls from './calls.service';
@@ -11,15 +11,15 @@ import * as calls from './calls.service';
 const router = Router();
 router.use(requireAuth);
 
-router.get(
-  '/',
-  validate({ query: listQuery }),
-  asyncHandler(async (req, res) => {
-    const { limit, cursor } = req.valid.query as { limit: number; cursor?: string };
-    const { items, meta } = await calls.history(req.user!.sub, limit, cursor);
-    sendPage(res, items, meta);
-  }),
-);
+async function listHistory(req: Request, res: Response): Promise<void> {
+  const { limit, cursor } = req.valid.query as { limit: number; cursor?: string };
+  const { items, meta } = await calls.history(req.user!.sub, limit, cursor);
+  sendPage(res, items, meta);
+}
+
+router.get('/', validate({ query: listQuery }), asyncHandler(listHistory));
+/** Alias for clients that still call GET /calls/history (must be before /:callId). */
+router.get('/history', validate({ query: listQuery }), asyncHandler(listHistory));
 
 router.post(
   '/',

@@ -222,21 +222,38 @@ export async function searchDiscoverable(query: string, excludeUserId: string, l
  */
 export async function softDeleteAccount(userId: string, purgeAfterDays = 30): Promise<void> {
   await db.transaction(async (tx) => {
+    const [user] = await tx.select().from(users).where(eq(users.userId, userId)).limit(1);
+    if (!user) return;
+
+    const previousHandle = user.handle.toLowerCase();
+    const tombstoneId = `deleted_${user.userId}`;
+
     await tx
       .update(users)
       .set({
         accountStatus: 'self_deleted',
         isActive: false,
+        handle: tombstoneId,
+        displayName: 'Deleted Account',
         deletedAt: sql`now()`,
         accountStatusUpdatedAt: sql`now()`,
         purgeScheduledAt: sql`now() + (${purgeAfterDays} || ' days')::interval`,
         updatedAt: sql`now()`,
       })
       .where(eq(users.userId, userId));
-    await tx
-      .update(identities)
-      .set({ status: 'self_deleted', currentUserId: null, deletedAt: sql`now()`, updatedAt: sql`now()` })
-      .where(eq(identities.currentUserId, userId));
+
+    if (user.identityId) {
+      await tx
+        .update(identities)
+        .set({
+          status: 'self_deleted',
+          currentUserId: null,
+          lastHandle: previousHandle,
+          deletedAt: sql`now()`,
+          updatedAt: sql`now()`,
+        })
+        .where(eq(identities.identityId, user.identityId));
+    }
   });
 }
 

@@ -95,6 +95,15 @@ function view(s: OnboardingSession) {
   };
 }
 
+async function enrichView(s: OnboardingSession) {
+  const lastHandle = await repo.previousHandleForIdentity(s.identityId);
+  return {
+    ...view(s),
+    lastHandle,
+    handleLocked: s.branch === 'self_deleted' && Boolean(lastHandle),
+  };
+}
+
 // ── Steps ─────────────────────────────────────────────────────────────────────
 
 export async function start(input: {
@@ -175,7 +184,7 @@ export async function digilockerCallback(sessionId: string) {
   });
 
   const canProceed = (PROCEEDABLE[s.purpose] ?? PROCEEDABLE.signup!).has(branch);
-  return { ...view(updated), branch, canProceed };
+  return { ...(await enrichView(updated)), branch, canProceed };
 }
 
 export async function livenessStart(sessionId: string) {
@@ -204,7 +213,7 @@ export async function livenessComplete(sessionId: string, selfieB64: string) {
 
   // Idempotent — client may retry after we already verified.
   if (s.status === 'matched' || s.status === 'liveness_verified') {
-    return { ...view(s), livenessScore: undefined };
+    return { ...(await enrichView(s)), livenessScore: undefined };
   }
 
   expect(s, ['liveness_started']);
@@ -225,14 +234,14 @@ export async function livenessComplete(sessionId: string, selfieB64: string) {
     docPhotoB64: null,
     selfieB64: null,
   });
-  return { ...view(updated), livenessScore: live.score };
+  return { ...(await enrichView(updated)), livenessScore: live.score };
 }
 
 /** Kept for older clients resuming at liveness_verified. No face compare — identity branch only. */
 export async function match(sessionId: string) {
   const s = await loadActive(sessionId);
   if (s.status === 'matched') {
-    return view(s);
+    return enrichView(s);
   }
   expect(s, ['liveness_verified', 'liveness_started']);
   if (!s.identityId || !s.legalName) {
@@ -243,7 +252,7 @@ export async function match(sessionId: string) {
     docPhotoB64: null,
     selfieB64: null,
   });
-  return view(updated);
+  return enrichView(updated);
 }
 
 export async function checkHandle(handle: string) {
@@ -257,14 +266,16 @@ export async function checkHandleForSession(sessionId: string, rawHandle: string
   try {
     const handle = await validateHandleForSession(s, rawHandle);
     await repo.patch(sessionId, { selectedHandle: handle });
-    return { handle, available: true, reason: null, nameLocked: true };
+    const locked = s.branch === 'self_deleted';
+    return { handle, available: true, reason: null, nameLocked: locked, handleLocked: locked };
   } catch (err) {
-    if (err instanceof AppError && ['HANDLE_TAKEN', 'HANDLE_INVALID'].includes(err.code)) {
+    if (err instanceof AppError && ['HANDLE_TAKEN', 'HANDLE_INVALID', 'HANDLE_LOCKED'].includes(err.code)) {
       return {
         handle: rawHandle.trim().toLowerCase().replace(/^@/, ''),
         available: false,
         reason: err.message,
-        nameLocked: true,
+        nameLocked: s.branch === 'self_deleted',
+        handleLocked: s.branch === 'self_deleted',
       };
     }
     throw err;
@@ -276,6 +287,10 @@ export async function suggestHandles(sessionId: string) {
   const s = await loadActive(sessionId);
   if (!s.legalName) {
     throw appError('ONBOARDING_STATE_INVALID', 'Verify your identity before choosing a handle.');
+  }
+  if (s.branch === 'self_deleted') {
+    const previous = await repo.previousHandleForIdentity(s.identityId);
+    return { suggestions: previous ? [previous] : [] };
   }
   const candidates = buildHandleCandidates(s.legalName)
     .map((h) => h.replace(/_/g, '.'))
@@ -293,12 +308,12 @@ export async function suggestHandles(sessionId: string) {
 export async function setHandle(sessionId: string, handle: string, displayName?: string) {
   const s = await loadActive(sessionId);
   expect(s, ['matched', 'liveness_verified', 'digilocker_verified']);
-  if (await repo.handleTaken(handle)) throw appError('HANDLE_TAKEN');
+  const normalized = await validateHandleForSession(s, handle);
   const updated = await repo.patch(sessionId, {
-    selectedHandle: handle.toLowerCase(),
+    selectedHandle: normalized,
     pendingDisplayName: displayName ?? null,
   });
-  return { ...view(updated), available: true };
+  return { ...(await enrichView(updated)), available: true };
 }
 
 export async function complete(sessionId: string, pin?: string) {
@@ -327,7 +342,7 @@ export async function complete(sessionId: string, pin?: string) {
 
   // Signup (new) or recreate (self_deleted): a handle must have been reserved.
   if (!s.selectedHandle) throw appError('ONBOARDING_STATE_INVALID', 'Please choose a handle first.');
-  if (await repo.handleTaken(s.selectedHandle)) throw appError('HANDLE_TAKEN');
+  await validateHandleForSession(s, s.selectedHandle);
 
   const { user } = await repo.createAccount({
     existingIdentityId: branch === 'self_deleted' ? s.identityId : null,

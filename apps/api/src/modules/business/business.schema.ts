@@ -17,6 +17,12 @@ export const subscribeBody = z.object({ channelId: z.string().uuid() });
 export const blockBody = z.object({ reason: z.string().trim().max(500).optional() });
 export const reportBody = z.object({ reason: z.string().trim().max(500).optional() });
 
+/** Business-scan: mint a rotating counter QR for a channel. */
+export const counterQrBody = z.object({ channelId: z.string().uuid() });
+
+/** Consumer: resolve or subscribe via counter QR token. */
+export const qrTokenBody = z.object({ token: z.string().uuid() });
+
 export const createChannelBody = z.object({
   name: z.string().trim().min(1).max(120),
   channelType: z.enum(['transactional', 'promotional', 'otp']),

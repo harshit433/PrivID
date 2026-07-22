@@ -57,6 +57,7 @@ export const ERRORS = {
   // Auth
   HANDLE_INVALID: { status: 400, message: 'Handles can use letters, numbers, dots and underscores.' },
   HANDLE_TAKEN: { status: 409, message: 'That handle is already taken.' },
+  HANDLE_LOCKED: { status: 409, message: 'Your previous handle is reserved for your return.' },
   HANDLE_NOT_FOUND: { status: 404, message: 'No TrustRoute account found with that handle.' },
   PIN_INVALID: { status: 401, message: 'Incorrect PIN.' },
   PIN_LOCKED: { status: 429, message: 'Too many attempts. Try again later.' },

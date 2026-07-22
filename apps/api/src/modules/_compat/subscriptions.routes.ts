@@ -1,17 +1,66 @@
 /**
  * Legacy `/subscriptions/*` compatibility → v2 `/businesses` service. The mobile app's
  * "company updates" surface (inbox, subscribed channels, respond/pause/resume/read a
- * subscription, block/report a business) predates the v2 `/businesses` grouping. Reads and
- * block/report delegate to the business service; subscription-status changes — which v2
- * exposes only implicitly — are applied directly against the subscription row here.
+ * subscription, block/report a business) predates the v2 `/businesses` grouping.
+ *
+ * Counter QR flow (business-scan shows QR → customer confirms):
+ *   POST /subscriptions/counter-qr     (API key)  → mint
+ *   POST /subscriptions/qr/resolve     (JWT)      → peek
+ *   POST /subscriptions/qr/subscribe   (JWT)      → consume + active sub
  */
 import { Router, type Express } from 'express';
-import { asyncHandler, sendOk, sendPage, requireAuth, apiLimiter, appError, db, businessSubscriptions, eq, and, sql } from '@trustroute/core';
+import {
+  asyncHandler,
+  sendOk,
+  sendPage,
+  requireAuth,
+  apiLimiter,
+  appError,
+  db,
+  businessSubscriptions,
+  eq,
+  and,
+  sql,
+  validate,
+} from '@trustroute/core';
 import * as biz from '../business/business.service';
+import { requireBusiness } from '../business/business.guard';
+import { counterQrBody, qrTokenBody } from '../business/business.schema';
 
+// ── API-key mint (business-scan) ──────────────────────────────────────────────
+const counterQrRouter = Router();
+counterQrRouter.use(requireBusiness);
+counterQrRouter.post(
+  '/counter-qr',
+  validate({ body: counterQrBody }),
+  asyncHandler(async (req, res) => {
+    const { channelId } = req.valid.body as { channelId: string };
+    sendOk(res, await biz.mintCounterQr(req.business!, channelId));
+  }),
+);
+
+// ── JWT consumer surface ──────────────────────────────────────────────────────
 const router = Router();
 router.use(requireAuth);
 const uid = (req: { user?: { sub: string } }) => req.user!.sub;
+
+router.post(
+  '/qr/resolve',
+  validate({ body: qrTokenBody }),
+  asyncHandler(async (req, res) => {
+    const { token } = req.valid.body as { token: string };
+    sendOk(res, await biz.resolveCounterQr(uid(req), token));
+  }),
+);
+
+router.post(
+  '/qr/subscribe',
+  validate({ body: qrTokenBody }),
+  asyncHandler(async (req, res) => {
+    const { token } = req.valid.body as { token: string };
+    sendOk(res, await biz.subscribeCounterQr(uid(req), token), { status: 201 });
+  }),
+);
 
 router.get('/inbox', asyncHandler(async (req, res) => {
   const { items, meta } = await biz.inbox(uid(req), 30, req.query.cursor as string | undefined);
@@ -49,5 +98,7 @@ router.post('/businesses/:businessId/block', asyncHandler(async (req, res) => se
 router.delete('/businesses/:businessId/block', asyncHandler(async (req, res) => sendOk(res, await biz.unblock(uid(req), req.params.businessId!))));
 
 export function register(app: Express): void {
+  // Mount API-key mint first so it isn't swallowed by JWT requireAuth.
+  app.use('/subscriptions', apiLimiter, counterQrRouter);
   app.use('/subscriptions', apiLimiter, router);
 }

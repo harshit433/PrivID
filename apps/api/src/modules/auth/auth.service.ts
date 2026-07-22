@@ -95,3 +95,20 @@ export async function logout(userId: string): Promise<void> {
 export async function setUserPin(userId: string, pin: string): Promise<void> {
   await usersRepo.setPin(userId, await usersRepo.hashPin(pin));
 }
+
+export async function changeUserPin(userId: string, currentPin: string, pin: string): Promise<void> {
+  const u = await usersRepo.findById(userId);
+  if (!u) throw appError('USER_INACTIVE');
+  assertCanAuthenticate({ accountStatus: u.accountStatus, isActive: u.isActive });
+  if (!u.pinHash) throw appError('PIN_NOT_SET');
+  if (u.pinLockedUntil && u.pinLockedUntil.getTime() > Date.now()) throw appError('PIN_LOCKED');
+
+  const ok = await bcrypt.compare(currentPin, u.pinHash);
+  if (!ok) {
+    const { lockedUntil } = await usersRepo.recordPinFailure(u.userId);
+    if (lockedUntil && lockedUntil.getTime() > Date.now()) throw appError('PIN_LOCKED');
+    throw appError('PIN_INVALID');
+  }
+  await usersRepo.clearPinFailures(u.userId);
+  await setUserPin(u.userId, pin);
+}

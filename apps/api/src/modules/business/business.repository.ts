@@ -260,6 +260,27 @@ export async function report(userId: string, businessId: string, reason?: string
   await db.insert(businessReports).values({ userId, businessId, reason: reason ?? null });
 }
 
+export async function findSubscription(
+  userId: string,
+  channelId: string,
+): Promise<SubscriptionRow | null> {
+  const [row] = await db
+    .select()
+    .from(businessSubscriptions)
+    .where(and(eq(businessSubscriptions.userId, userId), eq(businessSubscriptions.channelId, channelId)))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function isBlocked(userId: string, businessId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ id: businessBlocks.blockId })
+    .from(businessBlocks)
+    .where(and(eq(businessBlocks.userId, userId), eq(businessBlocks.businessId, businessId)))
+    .limit(1);
+  return !!row;
+}
+
 /** Active-subscription channel ids for a user (to annotate the directory). */
 export async function subscribedChannelIds(userId: string): Promise<string[]> {
   const rows = await db

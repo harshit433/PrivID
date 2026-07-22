@@ -4,7 +4,7 @@
  */
 import { Router, type Express } from 'express';
 import { asyncHandler, sendOk, validate, requireAuth, publicLimiter, appError } from '@trustroute/core';
-import { checkHandleBody, loginBody, refreshBody, setPinBody } from './auth.schema';
+import { checkHandleBody, loginBody, refreshBody, setPinBody, changePinBody } from './auth.schema';
 import * as authService from './auth.service';
 
 const router = Router();
@@ -63,13 +63,23 @@ router.post(
   }),
 );
 
+async function handleSetPin(req: Parameters<Parameters<typeof asyncHandler>[0]>[0], res: Parameters<Parameters<typeof asyncHandler>[0]>[1]) {
+  const { pin } = req.valid.body as { pin: string };
+  await authService.setUserPin(req.user!.sub, pin);
+  sendOk(res, { pinSet: true });
+}
+
+router.post('/pin', requireAuth, validate({ body: setPinBody }), asyncHandler(handleSetPin));
+/** Mobile clients (Flutter / RN) call POST /auth/pin/set. */
+router.post('/pin/set', requireAuth, validate({ body: setPinBody }), asyncHandler(handleSetPin));
+
 router.post(
-  '/pin',
+  '/pin/change',
   requireAuth,
-  validate({ body: setPinBody }),
+  validate({ body: changePinBody }),
   asyncHandler(async (req, res) => {
-    const { pin } = req.valid.body as { pin: string };
-    await authService.setUserPin(req.user!.sub, pin);
+    const { currentPin, pin } = req.valid.body as { currentPin: string; pin: string };
+    await authService.changeUserPin(req.user!.sub, currentPin, pin);
     sendOk(res, { pinSet: true });
   }),
 );

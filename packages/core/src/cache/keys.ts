@@ -10,6 +10,7 @@ export const TTL = {
   userProfile: 5 * 60,
   connectionList: 60,
   bizQr: 60,
+  bizCounterQr: 60,
   idempotency: 24 * 60 * 60,
 } as const;
 
@@ -24,6 +25,7 @@ export const keys = {
   connectionList: (ownerId: string) => `connections:${ownerId}`,
   mlFeedbackSent: (userId: string) => `ml:feedback:${userId}`,
   bizQr: (token: string) => `biz_qr:${token}`,
+  bizCounterQr: (token: string) => `biz_counter_qr:${token}`,
   bizApiRate: (businessId: string) => `ratelimit:biz_api:${businessId}`,
   rateLimit: (bucket: string) => `rl:${bucket}`,
   idempotency: (userId: string, key: string) => `idem:${userId}:${key}`,

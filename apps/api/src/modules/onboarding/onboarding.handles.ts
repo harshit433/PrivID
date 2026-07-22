@@ -80,6 +80,21 @@ export async function validateHandleForSession(
       `Your handle should be based on your verified name, ${session.legalName}.`,
     );
   }
+
+  if (session.branch === 'self_deleted') {
+    const previous = await repo.previousHandleForIdentity(session.identityId);
+    if (!previous) {
+      throw appError('ONBOARDING_STATE_INVALID', 'Could not restore your previous handle.');
+    }
+    if (handle !== previous) {
+      throw appError(
+        'HANDLE_LOCKED',
+        `Your previous handle @${previous} is reserved for your return.`,
+      );
+    }
+    return handle;
+  }
+
   if (await repo.handleTaken(handle)) {
     throw appError('HANDLE_TAKEN', `@${handle} is taken. Try another.`);
   }

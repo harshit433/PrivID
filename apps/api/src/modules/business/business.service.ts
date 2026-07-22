@@ -6,7 +6,15 @@
  * non-blocking subscribers synchronously here; the worker can assume this at scale (P8).
  */
 import crypto from 'crypto';
-import { appError, buildPage, decodeCursor, type PageMeta } from '@trustroute/core';
+import {
+  appError,
+  buildPage,
+  decodeCursor,
+  getRedis,
+  keys,
+  TTL,
+  type PageMeta,
+} from '@trustroute/core';
 import * as repo from './business.repository';
 import type { BusinessRow, ChannelRow, MessageRow } from './business.repository';
 import * as notifications from '../notifications/notifications.service';
@@ -168,4 +176,133 @@ export async function channelMessages(business: BusinessRow, channelId: string) 
   const channel = await repo.findChannel(channelId);
   if (!channel || channel.businessId !== business.businessId) throw appError('NOT_FOUND', 'Channel not found.');
   return { messages: (await repo.listChannelMessages(channelId)).map(messageView) };
+}
+
+// ── Counter QR (business shows QR → customer scans & confirms) ────────────────
+
+export type CounterQrPayload = {
+  businessId: string;
+  channelId: string;
+  businessName: string;
+  channelName: string;
+  channelType: string;
+  logoUrl: string | null;
+};
+
+/** Mint a 60s single-use counter QR for the operator's selected channel. */
+export async function mintCounterQr(business: BusinessRow, channelId: string) {
+  const channel = await repo.findChannel(channelId);
+  if (!channel || channel.businessId !== business.businessId) {
+    throw appError('NOT_FOUND', 'Channel not found.');
+  }
+  if (!channel.active) throw appError('CONFLICT', 'Channel is inactive.');
+
+  const token = crypto.randomUUID();
+  const payload: CounterQrPayload = {
+    businessId: business.businessId,
+    channelId: channel.channelId,
+    businessName: business.name,
+    channelName: channel.name,
+    channelType: channel.channelType,
+    logoUrl: business.logoUrl,
+  };
+  await getRedis().set(keys.bizCounterQr(token), JSON.stringify(payload), 'EX', TTL.bizCounterQr);
+  return {
+    token,
+    expiresIn: TTL.bizCounterQr,
+    qrValue: `trustroute://biz/${token}`,
+  };
+}
+
+async function peekCounterQr(token: string): Promise<CounterQrPayload | null> {
+  const raw = await getRedis().get(keys.bizCounterQr(token));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as CounterQrPayload;
+  } catch {
+    return null;
+  }
+}
+
+async function consumeCounterQr(token: string): Promise<CounterQrPayload | null> {
+  const redis = getRedis();
+  const key = keys.bizCounterQr(token);
+  const raw = await redis.get(key);
+  if (!raw) return null;
+  await redis.del(key);
+  try {
+    return JSON.parse(raw) as CounterQrPayload;
+  } catch {
+    return null;
+  }
+}
+
+/** Peek counter QR for the confirmation dialog (does not consume). */
+export async function resolveCounterQr(userId: string, token: string) {
+  const payload = await peekCounterQr(token);
+  if (!payload) {
+    throw appError('BAD_REQUEST', 'This business QR is invalid or expired. Ask them to refresh it.');
+  }
+  if (await repo.isBlocked(userId, payload.businessId)) {
+    throw appError('FORBIDDEN', 'You have blocked this business.');
+  }
+  const existing = await repo.findSubscription(userId, payload.channelId);
+  return {
+    businessId: payload.businessId,
+    channelId: payload.channelId,
+    businessName: payload.businessName,
+    channelName: payload.channelName,
+    channelType: payload.channelType,
+    logoUrl: payload.logoUrl,
+    alreadySubscribed: existing?.status === 'active',
+    alreadyPending: existing?.status === 'pending',
+    subscriptionId: existing?.subscriptionId ?? null,
+    subscriptionStatus: existing?.status ?? null,
+  };
+}
+
+/** Consume counter QR and create an active subscription after user confirmation. */
+export async function subscribeCounterQr(userId: string, token: string) {
+  const payload = await consumeCounterQr(token);
+  if (!payload) {
+    throw appError('BAD_REQUEST', 'This business QR is invalid or expired. Ask them to refresh it.');
+  }
+  if (await repo.isBlocked(userId, payload.businessId)) {
+    throw appError('FORBIDDEN', 'You have blocked this business.');
+  }
+
+  const channel = await repo.findChannel(payload.channelId);
+  if (!channel || channel.businessId !== payload.businessId) {
+    throw appError('NOT_FOUND', 'Channel not found.');
+  }
+  if (!channel.active) throw appError('CONFLICT', 'This channel is no longer active.');
+
+  const existing = await repo.findSubscription(userId, payload.channelId);
+  if (existing?.status === 'active') {
+    return {
+      subscriptionId: existing.subscriptionId,
+      status: 'active' as const,
+      alreadySubscribed: true,
+      businessId: payload.businessId,
+      businessName: payload.businessName,
+      channelId: payload.channelId,
+      channelName: payload.channelName,
+      channelType: payload.channelType,
+      logoUrl: payload.logoUrl,
+    };
+  }
+
+  const sub = await repo.subscribe(userId, payload.businessId, payload.channelId);
+  return {
+    subscriptionId: sub.subscriptionId,
+    status: sub.status,
+    alreadySubscribed: false,
+    businessId: payload.businessId,
+    businessName: payload.businessName,
+    channelId: payload.channelId,
+    channelName: payload.channelName,
+    channelType: payload.channelType,
+    logoUrl: payload.logoUrl,
+    subscribedAt: sub.subscribedAt,
+  };
 }

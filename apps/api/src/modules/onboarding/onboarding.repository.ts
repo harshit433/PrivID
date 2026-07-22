@@ -3,7 +3,7 @@
  * the transactional home for turning a verified session into an identity + user.
  * Ephemeral face-match images live on the session row and are purged on completion.
  */
-import { db, onboardingSessions, identities, users, eq, sql } from '@trustroute/core';
+import { db, onboardingSessions, identities, users, eq, and, sql } from '@trustroute/core';
 import type { IdentityRow } from '../identity/identity.repository';
 import type { UserRow } from '../users/users.repository';
 
@@ -73,6 +73,54 @@ export async function handleTaken(handle: string): Promise<boolean> {
   return Boolean(row);
 }
 
+/** Previous @handle for a returning self-deleted identity (identity row or legacy user row). */
+export async function previousHandleForIdentity(identityId: string | null): Promise<string | null> {
+  if (!identityId) return null;
+
+  const [identity] = await db
+    .select({ lastHandle: identities.lastHandle })
+    .from(identities)
+    .where(eq(identities.identityId, identityId))
+    .limit(1);
+  if (identity?.lastHandle) return identity.lastHandle.toLowerCase();
+
+  const [legacy] = await db
+    .select({ handle: users.handle })
+    .from(users)
+    .where(
+      and(
+        eq(users.identityId, identityId),
+        eq(users.accountStatus, 'self_deleted'),
+        sql`${users.handle} NOT LIKE 'deleted_%'`,
+      ),
+    )
+    .orderBy(sql`${users.deletedAt} DESC NULLS LAST`)
+    .limit(1);
+  return legacy?.handle?.toLowerCase() ?? null;
+}
+
+/** Free a self-deleted user's handle so the same person can reclaim it on reactivation. */
+export async function tombstoneSelfDeletedHandles(
+  tx: Pick<typeof db, 'select' | 'update'>,
+  identityId: string,
+  handle: string,
+): Promise<void> {
+  const normalized = handle.toLowerCase();
+  const rows = await tx
+    .select({ userId: users.userId, handle: users.handle })
+    .from(users)
+    .where(and(eq(users.identityId, identityId), eq(users.accountStatus, 'self_deleted')));
+
+  for (const row of rows) {
+    if (row.handle.toLowerCase() === normalized || !row.handle.startsWith('deleted_')) {
+      await tx
+        .update(users)
+        .set({ handle: `deleted_${row.userId}`, updatedAt: sql`now()` })
+        .where(eq(users.userId, row.userId));
+    }
+  }
+}
+
 /**
  * Create (or, for a self-deleted identity, reactivate) the account in one transaction:
  *   - `new` branch     → insert a fresh identity, then the user, then link them.
@@ -93,6 +141,7 @@ export async function createAccount(input: {
   return db.transaction(async (tx) => {
     let identity: IdentityRow;
     if (input.existingIdentityId) {
+      await tombstoneSelfDeletedHandles(tx, input.existingIdentityId, input.handle);
       const [row] = await tx
         .update(identities)
         .set({

@@ -16,6 +16,7 @@ import {
   businessIdParam,
   subIdParam,
   channelIdParam,
+  counterQrBody,
 } from './business.schema';
 import { requireBusiness } from './business.guard';
 import * as business from './business.service';
@@ -124,6 +125,16 @@ opRouter.get(
   asyncHandler(async (req, res) => {
     const { channelId } = req.valid.params as { channelId: string };
     sendOk(res, await business.channelMessages(req.business!, channelId));
+  }),
+);
+
+/** Mint rotating counter QR for a channel (also exposed under /subscriptions/counter-qr for Scan app). */
+opRouter.post(
+  '/counter-qr',
+  validate({ body: counterQrBody }),
+  asyncHandler(async (req, res) => {
+    const { channelId } = req.valid.body as { channelId: string };
+    sendOk(res, await business.mintCounterQr(req.business!, channelId));
   }),
 );
 

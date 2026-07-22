@@ -20,6 +20,40 @@ export const refreshBody = z.object({
   refresh_token: z.string().min(20),
 });
 
-export const setPinBody = z.object({
-  pin: pinSchema,
-});
+export const setPinBody = z
+  .object({
+    pin: pinSchema,
+    confirmPin: pinSchema.optional(),
+  })
+  .superRefine((body, ctx) => {
+    if (body.confirmPin != null && body.confirmPin !== body.pin) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'PIN confirmation does not match.',
+        path: ['confirmPin'],
+      });
+    }
+  });
+
+export const changePinBody = z
+  .object({
+    currentPin: pinSchema,
+    pin: pinSchema,
+    confirmPin: pinSchema.optional(),
+  })
+  .superRefine((body, ctx) => {
+    if (body.confirmPin != null && body.confirmPin !== body.pin) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'PIN confirmation does not match.',
+        path: ['confirmPin'],
+      });
+    }
+    if (body.currentPin === body.pin) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'New PIN must be different from your current PIN.',
+        path: ['pin'],
+      });
+    }
+  });

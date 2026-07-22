@@ -175,6 +175,9 @@ export async function addPayoutMethod(input: {
   detailsMasked: string;
   holderName?: string | null;
   isDefault: boolean;
+  fundAccountRef?: string | null;
+  razorpayContactRef?: string | null;
+  verified?: boolean;
 }): Promise<PayoutMethodRow> {
   return db.transaction(async (tx) => {
     if (input.isDefault) {
@@ -182,7 +185,16 @@ export async function addPayoutMethod(input: {
     }
     const [row] = await tx
       .insert(payoutMethods)
-      .values({ userId: input.userId, type: input.type, detailsMasked: input.detailsMasked, holderName: input.holderName ?? null, isDefault: input.isDefault })
+      .values({
+        userId: input.userId,
+        type: input.type,
+        detailsMasked: input.detailsMasked,
+        holderName: input.holderName ?? null,
+        isDefault: input.isDefault,
+        fundAccountRef: input.fundAccountRef ?? null,
+        razorpayContactRef: input.razorpayContactRef ?? null,
+        verified: input.verified ?? false,
+      })
       .returning();
     return row!;
   });

@@ -4,9 +4,17 @@
  * withdrawable) is driven by the worker; exposed here as `qualify` for it to call.
  */
 import crypto from 'crypto';
-import { appError, getPayoutsProvider } from '@trustroute/core';
+import {
+  appError,
+  getPayoutsProvider,
+  providerStatus,
+  createRazorpayContact,
+  createFundAccountUpi,
+  createFundAccountBank,
+} from '@trustroute/core';
 import * as repo from './referrals.repository';
 import type { ReferralRow, PayoutMethodRow, PayoutRow } from './referrals.repository';
+import * as usersRepo from '../users/users.repository';
 
 const REFERRER_REWARD_PAISE = 3000;
 const REFEREE_BONUS_PAISE = 1000;
@@ -97,12 +105,52 @@ export async function addPayoutMethod(
   userId: string,
   input: { type: 'upi' | 'bank'; value: string; holderName?: string; isDefault?: boolean },
 ) {
+  const raw = input.value.trim();
+  let fundAccountRef: string | null = null;
+  let razorpayContactRef: string | null = null;
+  let verified = false;
+
+  if (providerStatus.payoutsConfigured()) {
+    const user = await usersRepo.findById(userId);
+    if (!user) throw appError('USER_INACTIVE');
+    const holderName = input.holderName?.trim() || user.displayName || user.legalName || user.handle;
+
+    if (input.type === 'upi') {
+      const upi = raw.toLowerCase();
+      if (!/^[\w.-]+@[\w.-]+$/.test(upi)) {
+        throw appError('BAD_REQUEST', 'Enter a valid UPI ID.');
+      }
+      razorpayContactRef = await createRazorpayContact(userId, holderName);
+      fundAccountRef = await createFundAccountUpi({ contactId: razorpayContactRef, upiId: upi });
+      verified = true;
+    } else {
+      const [accountNumber, ifsc] = raw.split('|').map((s) => s.trim());
+      if (!accountNumber || !ifsc) {
+        throw appError('BAD_REQUEST', 'Bank details must be account_number|IFSC.');
+      }
+      if (!/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifsc.toUpperCase())) {
+        throw appError('BAD_REQUEST', 'Enter a valid IFSC code.');
+      }
+      razorpayContactRef = await createRazorpayContact(userId, holderName);
+      fundAccountRef = await createFundAccountBank({
+        contactId: razorpayContactRef,
+        name: holderName,
+        ifsc: ifsc.toUpperCase(),
+        accountNumber,
+      });
+      verified = true;
+    }
+  }
+
   const m = await repo.addPayoutMethod({
     userId,
     type: input.type,
-    detailsMasked: maskDetails(input.type, input.value),
+    detailsMasked: maskDetails(input.type, raw.split('|')[0] ?? raw),
     holderName: input.holderName ?? null,
     isDefault: input.isDefault ?? false,
+    fundAccountRef,
+    razorpayContactRef,
+    verified,
   });
   return methodView(m);
 }

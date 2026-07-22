@@ -14,6 +14,7 @@ import {
   completeBody,
 } from './onboarding.schema';
 import * as onboarding from './onboarding.service';
+import { digilockerReturnRouter } from './digilocker.return';
 
 const router = Router();
 
@@ -98,5 +99,6 @@ router.post(
 );
 
 export function register(app: Express): void {
+  app.use('/onboarding/digilocker', digilockerReturnRouter);
   app.use('/onboarding', publicLimiter, router);
 }

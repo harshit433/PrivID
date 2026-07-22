@@ -91,23 +91,38 @@ const envSchema = z.object({
 
   LIVENESS_PROVIDER: z.string().optional(),
   LIVENESS_API_KEY: z.string().optional(),
+  LUXAND_API_TOKEN: z.string().optional(),
   LIVENESS_BASE_URL: z.string().optional(),
+  LIVENESS_CONFIDENCE_THRESHOLD: z
+    .string()
+    .optional()
+    .transform((v) => (v == null || v === '' ? 0.5 : Number(v)))
+    .pipe(z.number()),
+  FACE_MATCH_THRESHOLD: z
+    .string()
+    .optional()
+    .transform((v) => (v == null || v === '' ? 0.7 : Number(v)))
+    .pipe(z.number()),
 
   EXOTEL_SID: z.string().optional(),
   EXOTEL_API_KEY: z.string().optional(),
   EXOTEL_API_TOKEN: z.string().optional(),
+  EXOTEL_TOKEN: z.string().optional(),
   EXOTEL_SUBDOMAIN: z.string().optional(),
   EXOTEL_CALLER_ID: z.string().optional(),
+  TELEPHONY_WEBHOOK_SECRET: z.string().optional(),
 
   RAZORPAY_KEY_ID: z.string().optional(),
   RAZORPAY_KEY_SECRET: z.string().optional(),
   RAZORPAY_WEBHOOK_SECRET: z.string().optional(),
   RAZORPAYX_ACCOUNT_NUMBER: z.string().optional(),
+  RAZORPAYX_WEBHOOK_SECRET: z.string().optional(),
 
   AWS_REGION: z.string().optional(),
   AWS_ACCESS_KEY_ID: z.string().optional(),
   AWS_SECRET_ACCESS_KEY: z.string().optional(),
   S3_BUCKET: z.string().optional(),
+  AWS_S3_BUCKET: z.string().optional(),
   S3_PUBLIC_BASE_URL: z.string().optional(),
 
   MSG91_AUTH_KEY: z.string().optional(),

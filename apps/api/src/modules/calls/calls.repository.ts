@@ -3,6 +3,7 @@
  * append-only behavior-event log that feeds trust/abuse signals. History joins the
  * "counterpart" (the other party) so the client renders a call log without N+1 reads.
  */
+import crypto from 'node:crypto';
 import {
   db,
   calls,
@@ -69,16 +70,20 @@ export async function createCall(input: {
   calleeId: string;
   callType?: CallRow['callType'];
   channelId?: string | null;
-  streamCallId: string;
+  /** Omit to use the call's own id, keeping the Stream room and the call row aligned. */
+  streamCallId?: string;
+  callId?: string;
 }): Promise<CallRow> {
+  const callId = input.callId ?? crypto.randomUUID();
   const [row] = await db
     .insert(calls)
     .values({
+      callId,
       callerId: input.callerId,
       calleeId: input.calleeId,
       callType: input.callType ?? 'direct',
       channelId: input.channelId ?? null,
-      streamCallId: input.streamCallId,
+      streamCallId: input.streamCallId ?? callId,
       status: 'ringing',
     })
     .returning();

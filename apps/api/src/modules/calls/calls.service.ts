@@ -79,14 +79,16 @@ export async function initiate(
   await stream.upsertUser({ id: callerId, name: caller?.displayName ?? caller?.handle, image: caller?.avatarUrl ?? undefined });
   await stream.upsertUser({ id: callee.userId, name: callee.displayName ?? callee.handle, image: callee.avatarUrl ?? undefined });
 
-  const streamCallId = crypto.randomUUID();
+  // The Stream room id is the call's own id: the app joins the room named by
+  // the id it gets back, and answer/end address the same value. Minting a
+  // second, separate uuid here meant the row pointed at a room nobody joined.
   const call = await repo.createCall({
     callerId,
     calleeId: callee.userId,
     callType: input.callType ?? 'direct',
     channelId: input.channelId ?? null,
-    streamCallId,
   });
+  const streamCallId = call.streamCallId ?? call.callId;
 
   // Backstop: if nobody answers, flip to missed. Best-effort — a queue outage must
   // never prevent a call from being placed (jobIds can't contain ':').
@@ -98,6 +100,33 @@ export async function initiate(
   await repo.logBehavior(callerId, 'call_initiated', callee.userId, { callId: call.callId, callType: call.callType });
 
   return { call: callView(call), stream: streamConfig(stream.videoToken(callerId), streamCallId) };
+}
+
+/** Stream Video credentials for the signed-in user. */
+export async function streamToken(userId: string) {
+  const stream = getStreamProvider();
+  const u = await usersRepo.findById(userId);
+  if (!u) throw appError('USER_INACTIVE');
+  await stream.upsertUser({ id: userId, name: u.displayName ?? u.handle, image: u.avatarUrl ?? undefined });
+  return {
+    apiKey: config.STREAM_API_KEY ?? null,
+    token: stream.videoToken(userId),
+    provider: stream.configured ? 'stream' : 'mock',
+    user: { id: userId, name: u.displayName ?? u.handle, image: u.avatarUrl },
+  };
+}
+
+/**
+ * Create the call row and hand back the id the app uses as the Stream room.
+ * The app calls this before `getOrCreate(ringing: true)`; ringing itself is
+ * driven by Stream, so this only needs to reserve and authorise the call.
+ */
+export async function prepareStream(
+  callerId: string,
+  input: { handle?: string; calleeId?: string; video?: boolean },
+) {
+  const { call } = await initiate(callerId, { handle: input.handle, calleeId: input.calleeId });
+  return { callId: call.callId, video: Boolean(input.video), status: call.status };
 }
 
 export async function answer(userId: string, callId: string) {

@@ -21,6 +21,17 @@ export const initiateBody = z
     message: 'Provide a handle or calleeId to call.',
   });
 
+export const prepareStreamBody = z
+  .object({
+    handle: handle.optional(),
+    calleeId: z.string().uuid().optional(),
+    video: z.boolean().optional(),
+  })
+  .refine((b) => Boolean(b.handle) || Boolean(b.calleeId), {
+    message: 'Provide a handle or calleeId to call.',
+    path: ['calleeId'],
+  });
+
 export const declineBody = z.object({ reason: z.string().trim().max(120).optional() });
 
 export const qualityBody = z.object({

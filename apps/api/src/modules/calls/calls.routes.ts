@@ -5,7 +5,7 @@
  */
 import { Router, type Express, type Request, type Response } from 'express';
 import { asyncHandler, sendOk, sendPage, validate, requireAuth, apiLimiter, idempotency } from '@trustroute/core';
-import { initiateBody, declineBody, qualityBody, listQuery, callIdParam } from './calls.schema';
+import { initiateBody, prepareStreamBody, declineBody, qualityBody, listQuery, callIdParam } from './calls.schema';
 import * as calls from './calls.service';
 
 const router = Router();
@@ -29,6 +29,29 @@ router.post(
     sendOk(res, await calls.initiate(req.user!.sub, req.valid.body as Parameters<typeof calls.initiate>[1]), {
       status: 201,
     });
+  }),
+);
+
+/**
+ * What the app actually calls to place a call. Must precede /:callId, which
+ * would otherwise swallow "stream". Returns the id used as the Stream room.
+ */
+router.post(
+  '/stream/prepare',
+  idempotency(),
+  validate({ body: prepareStreamBody }),
+  asyncHandler(async (req, res) => {
+    sendOk(res, await calls.prepareStream(req.user!.sub, req.valid.body as Parameters<typeof calls.prepareStream>[1]), {
+      status: 201,
+    });
+  }),
+);
+
+/** Stream video credentials for the signed-in user. */
+router.get(
+  '/stream-token',
+  asyncHandler(async (req, res) => {
+    sendOk(res, await calls.streamToken(req.user!.sub));
   }),
 );
 

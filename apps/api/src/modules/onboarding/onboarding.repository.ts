@@ -189,7 +189,13 @@ export async function createAccount(input: {
         kycStatus: 'verified',
         kycProvider: input.provider,
         kycVerifiedAt: sql`now()`,
-        onboardingComplete: true,
+        // Account creation is not the end of onboarding — PIN setup still
+        // follows, and POST /onboarding/finish is what marks completion.
+        // Setting this true here made the client treat the session as fully
+        // authenticated the moment the account existed, so the router
+        // redirected out of /onboarding and the PIN screen was never shown.
+        // Only a PIN supplied at creation time completes it outright.
+        onboardingComplete: Boolean(input.pinHash),
         accountStatus: 'active',
         isActive: true,
         pinHash: input.pinHash,

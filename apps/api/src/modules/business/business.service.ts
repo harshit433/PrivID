@@ -18,6 +18,7 @@ import {
 import * as repo from './business.repository';
 import type { BusinessRow, ChannelRow, MessageRow } from './business.repository';
 import * as notifications from '../notifications/notifications.service';
+import * as usersRepo from '../users/users.repository';
 
 export function hashApiKey(key: string): string {
   return crypto.createHash('sha256').update(key).digest('hex');
@@ -114,6 +115,28 @@ export async function mySubscriptions(userId: string, status?: 'pending' | 'acti
 
 export async function myBlocked(userId: string) {
   return { blocked: await repo.listBlockedBusinesses(userId) };
+}
+
+/**
+ * Rotating counter QR for a user who owns a verified business — what shop staff
+ * display for customers to scan and subscribe. Short-lived by design so a
+ * photographed code stops working almost immediately.
+ */
+export async function myCounterQr(userId: string, channelId?: string) {
+  const user = await usersRepo.findById(userId);
+  if (!user) throw appError('USER_INACTIVE');
+
+  const business = await repo.findByVerifiedHandle(user.handle);
+  if (!business) throw appError('NOT_FOUND', 'No verified business is linked to your handle.');
+
+  let targetChannelId = channelId;
+  if (!targetChannelId) {
+    const channels = await repo.listChannels(business.businessId);
+    const active = channels.find((c) => c.active);
+    if (!active) throw appError('NOT_FOUND', 'This business has no active channel.');
+    targetChannelId = active.channelId;
+  }
+  return mintCounterQr(business, targetChannelId);
 }
 
 export async function unsubscribe(userId: string, subscriptionId: string) {

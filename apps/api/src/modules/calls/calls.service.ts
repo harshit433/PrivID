@@ -129,6 +129,37 @@ export async function prepareStream(
   return { callId: call.callId, video: Boolean(input.video), status: call.status };
 }
 
+/**
+ * Calls ringing this user right now. A fallback for a missed push or a dropped
+ * socket — the app polls this so an incoming call is not lost. Each row carries
+ * the caller's connection type so the callee sees the same "unknown caller"
+ * framing the push would have given them.
+ */
+export async function pending(userId: string) {
+  const rows = await repo.listPendingForCallee(userId);
+  const items = await Promise.all(
+    rows.map(async (r) => {
+      const edge = await connectionsRepo.findEdge(userId, r.caller.userId);
+      return {
+        callId: r.callId,
+        callType: r.callType,
+        status: r.status,
+        createdAt: r.createdAt,
+        streamCallId: r.streamCallId,
+        webrtcRoomId: r.streamCallId,
+        callerUserId: r.caller.userId,
+        callerHandle: r.caller.handle,
+        callerName: r.caller.displayName ?? r.caller.handle,
+        callerAvatarUrl: r.caller.avatarUrl,
+        trustTier: r.caller.trustTier,
+        trustScore: r.caller.trustScore ?? 0,
+        connectionType: edge?.connectionType ?? 'unknown',
+      };
+    }),
+  );
+  return { items };
+}
+
 export async function answer(userId: string, callId: string) {
   const call = await loadParticipant(callId, userId);
   if (call.calleeId !== userId) throw appError('FORBIDDEN', 'Only the callee can answer.');

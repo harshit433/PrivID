@@ -19,3 +19,13 @@ export const reportBody = z.object({
 
 export const listQuery = paginationQuery;
 export const callIdParam = z.object({ callId: z.string().uuid() });
+
+/** Pre-flight check before placing a masked call: can this caller afford it? */
+export const precheckBody = z.object({
+  number: e164,
+});
+
+/** In-call keypad tone, forwarded to the telephony provider. */
+export const dtmfBody = z.object({
+  digit: z.string().trim().regex(/^[0-9*#]$/, 'Digit must be 0-9, * or #.'),
+});

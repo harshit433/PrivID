@@ -16,6 +16,7 @@ import {
   or,
   sql,
   ilike,
+  inArray,
   desc,
   acquireGate,
   keys,
@@ -281,4 +282,50 @@ export async function listDataExports(userId: string) {
     .where(eq(dataExportRequests.userId, userId))
     .orderBy(desc(dataExportRequests.createdAt))
     .limit(20);
+}
+
+export interface PhoneMatchRow {
+  userId: string;
+  handle: string;
+  displayName: string | null;
+  avatarUrl: string | null;
+  trustTier: (typeof users.$inferSelect)['trustTier'];
+  trustScore: number | null;
+  phoneHash: string | null;
+}
+
+/**
+ * Match address-book phone hashes to accounts.
+ *
+ * Only `public` discovery accounts are returned: a user who set discovery to
+ * private has said they do not want to be found, and holding their number is
+ * not consent to override that. The raw number never reaches the server — only
+ * its hash — and the hash is echoed back purely so the client can re-associate
+ * a match with the local contact it came from.
+ */
+export async function findByPhoneHashes(
+  hashes: string[],
+  excludeUserId: string,
+): Promise<PhoneMatchRow[]> {
+  if (hashes.length === 0) return [];
+  return db
+    .select({
+      userId: users.userId,
+      handle: users.handle,
+      displayName: users.displayName,
+      avatarUrl: users.avatarUrl,
+      trustTier: users.trustTier,
+      trustScore: sql<number | null>`CASE WHEN ${users.discoveryShowTrustScore} THEN ${users.trustScore} ELSE NULL END`,
+      phoneHash: users.phoneHash,
+    })
+    .from(users)
+    .where(
+      and(
+        inArray(users.phoneHash, hashes),
+        ne(users.userId, excludeUserId),
+        eq(users.discoveryMode, 'public'),
+        eq(users.accountStatus, 'active'),
+      ),
+    )
+    .limit(hashes.length);
 }

@@ -47,6 +47,14 @@ router.post(
   }),
 );
 
+/** Calls ringing right now — fallback when a push was missed. */
+router.get(
+  '/pending',
+  asyncHandler(async (req, res) => {
+    sendOk(res, await calls.pending(req.user!.sub));
+  }),
+);
+
 /** Stream video credentials for the signed-in user. */
 router.get(
   '/stream-token',

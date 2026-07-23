@@ -57,6 +57,11 @@ export interface TelephonyProvider {
     callbackUrl?: string;
   }): Promise<MaskedCallHandle>;
   endCall(providerRef: string): Promise<void>;
+  /**
+   * Send a DTMF tone into a live call. Optional: not every provider exposes
+   * one, and the mock does not, so callers must feature-detect.
+   */
+  sendDtmf?(providerRef: string, digit: string): Promise<void>;
 }
 
 // ── Realtime chat + video (Stream) ────────────────────────────────────────────
@@ -68,6 +73,8 @@ export interface StreamUserUpsert {
 export interface StreamProvider {
   readonly configured: boolean;
   chatToken(userId: string): string;
+  /** Hard-delete a chat message. Optional — the mock provider has no store. */
+  deleteMessage?(messageId: string, hard?: boolean): Promise<void>;
   videoToken(userId: string): string;
   upsertUser(user: StreamUserUpsert): Promise<void>;
   verifyWebhook(rawBody: Buffer | string, signature: string): boolean;

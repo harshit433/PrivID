@@ -22,3 +22,7 @@ export const openChannelBody = z
     message: 'Provide a handle or a user id.',
     path: ['handle'],
   });
+
+export const otherUserIdParam = z.object({ otherUserId: z.string().uuid() });
+
+export const messageIdParam = z.object({ messageId: z.string().trim().min(1).max(120) });

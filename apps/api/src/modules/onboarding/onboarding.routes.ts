@@ -15,8 +15,11 @@ import {
   setHandleBody,
   completeBody,
   finishBody,
+  appealBody,
+  appealStatusQuery,
 } from './onboarding.schema';
 import * as onboarding from './onboarding.service';
+import * as appeals from './appeals.service';
 import { digilockerReturnRouter } from './digilocker.return';
 
 const router = Router();
@@ -152,6 +155,32 @@ router.post(
   asyncHandler(async (req, res) => {
     const { referralCode } = req.valid.body as { referralCode?: string };
     sendOk(res, await onboarding.finish(req.user!.sub, referralCode));
+  }),
+);
+
+// Appeals. Deliberately unauthenticated: enforcement is identity-level, so the
+// person who most needs this route is precisely the one who cannot sign in.
+// Declared before the `/:` -free routes above are mounted, and rate-limited by
+// the router's publicLimiter.
+router.post(
+  '/appeal',
+  validate({ body: appealBody }),
+  asyncHandler(async (req, res) => {
+    const body = req.valid.body as Parameters<typeof appeals.submit>[0];
+    const result = await appeals.submit(body);
+    sendOk(res, result, { status: result.duplicate ? 200 : 201 });
+  }),
+);
+
+router.get(
+  '/appeal/status',
+  validate({ query: appealStatusQuery }),
+  asyncHandler(async (req, res) => {
+    const q = req.valid.query as { session_id?: string; identity_id?: string; user_id?: string };
+    sendOk(
+      res,
+      await appeals.status({ sessionId: q.session_id, identityId: q.identity_id, userId: q.user_id }),
+    );
   }),
 );
 

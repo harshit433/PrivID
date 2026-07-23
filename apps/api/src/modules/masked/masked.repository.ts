@@ -137,3 +137,23 @@ export async function ensureDevPool(numbers: string[]): Promise<void> {
     await db.insert(numberPool).values({ virtualNumber: n }).onConflictDoNothing();
   }
 }
+
+/** Masked calls this caller has started today (local server day). */
+export async function countToday(callerId: string): Promise<number> {
+  const [row] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(maskedCalls)
+    .where(and(eq(maskedCalls.callerId, callerId), sql`${maskedCalls.createdAt} >= date_trunc('day', now())`));
+  return row?.n ?? 0;
+}
+
+/** A virtual number currently leased to this caller, if any. */
+export async function activeVirtualNumberFor(callerId: string): Promise<string | null> {
+  const [row] = await db
+    .select({ n: maskedCalls.virtualNumber })
+    .from(maskedCalls)
+    .where(and(eq(maskedCalls.callerId, callerId), sql`${maskedCalls.status} IN ('placing','ringing_caller','ringing_callee','connected')`))
+    .orderBy(desc(maskedCalls.createdAt))
+    .limit(1);
+  return row?.n ?? null;
+}

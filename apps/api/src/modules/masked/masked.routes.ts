@@ -4,7 +4,7 @@
  */
 import { Router, type Express } from 'express';
 import { asyncHandler, sendOk, sendPage, validate, requireAuth, apiLimiter, idempotency } from '@trustroute/core';
-import { initiateBody, reportBody, listQuery, callIdParam } from './masked.schema';
+import { initiateBody, precheckBody, dtmfBody, reportBody, listQuery, callIdParam } from './masked.schema';
 import * as masked from './masked.service';
 
 const router = Router();
@@ -63,6 +63,30 @@ router.post(
   asyncHandler(async (req, res) => {
     const { callId } = req.valid.params as { callId: string };
     sendOk(res, await masked.end(req.user!.sub, callId));
+  }),
+);
+
+/**
+ * Pre-flight affordability/cap check. Safe to declare after `/:callId` because
+ * that route is a GET — there is no single-segment POST pattern to shadow it.
+ */
+router.post(
+  '/precheck',
+  validate({ body: precheckBody }),
+  asyncHandler(async (req, res) => {
+    const { number } = req.valid.body as { number: string };
+    sendOk(res, await masked.precheck(req.user!.sub, number));
+  }),
+);
+
+/** In-call keypad tone (IVR menus, extensions). */
+router.post(
+  '/:callId/dtmf',
+  validate({ params: callIdParam, body: dtmfBody }),
+  asyncHandler(async (req, res) => {
+    const { callId } = req.valid.params as { callId: string };
+    const { digit } = req.valid.body as { digit: string };
+    sendOk(res, await masked.sendDtmf(req.user!.sub, callId, digit));
   }),
 );
 

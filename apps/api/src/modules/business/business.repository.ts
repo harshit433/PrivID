@@ -368,3 +368,17 @@ export async function displayNames(userIds: string[]): Promise<Map<string, strin
   const rows = await db.select({ userId: users.userId, handle: users.handle }).from(users).where(inArray(users.userId, userIds));
   return new Map(rows.map((r) => [r.userId, r.handle]));
 }
+
+/**
+ * The business a user owns, matched on `verified_handle` — the TrustRoute
+ * handle the business claimed and had verified. This is the only user->business
+ * link in the schema; businesses otherwise authenticate by API key.
+ */
+export async function findByVerifiedHandle(handle: string): Promise<BusinessRow | null> {
+  const [row] = await db
+    .select()
+    .from(businesses)
+    .where(and(eq(businesses.verifiedHandle, handle.toLowerCase()), eq(businesses.status, 'verified')))
+    .limit(1);
+  return row ?? null;
+}

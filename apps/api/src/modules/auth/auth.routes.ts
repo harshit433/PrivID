@@ -58,8 +58,20 @@ router.post(
   '/logout',
   requireAuth,
   asyncHandler(async (req, res) => {
-    await authService.logout(req.user!.sub);
+    // Body is optional: with a refresh token we end just this device's session.
+    const { refreshToken } = (req.body ?? {}) as { refreshToken?: string };
+    await authService.logout(req.user!.sub, refreshToken);
     sendOk(res, { loggedOut: true });
+  }),
+);
+
+/** Sign out on every device — revokes all refresh tokens for the account. */
+router.post(
+  '/logout-all',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    await authService.logoutAll(req.user!.sub);
+    sendOk(res, { loggedOut: true, allDevices: true });
   }),
 );
 

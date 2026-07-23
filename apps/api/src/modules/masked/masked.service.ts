@@ -25,6 +25,8 @@ function hashNumber(e164: string): string {
   return crypto.createHash('sha256').update(e164.replace(/\s+/g, '')).digest('hex');
 }
 
+const DAILY_CALL_CAP = 20;
+
 const costForSeconds = (seconds: number): number => Math.ceil(seconds / 60) * RATE_PAISE_PER_MIN;
 
 function view(c: MaskedCallRow) {
@@ -90,6 +92,71 @@ export async function initiate(
  * Provider-driven "connected" transition (Exotel passthru/callback). Exposed as a
  * service call so the webhook handler (or a mock caller) can advance the state.
  */
+/**
+ * Pre-flight check the app runs before showing the dial screen: can this caller
+ * actually place the call, and what will it cost? Answering here means the user
+ * sees "top up to call" instead of a failed call that has already taken a hold.
+ */
+export async function precheck(callerId: string, _number: string) {
+  const caller = await usersRepo.findById(callerId);
+  if (!caller) throw appError('USER_INACTIVE');
+
+  const [balance, usedToday, activeNumber] = await Promise.all([
+    wallet.getBalance(callerId),
+    repo.countToday(callerId),
+    repo.activeVirtualNumberFor(callerId),
+  ]);
+
+  const balancePaise = balance.balancePaise ?? 0;
+  const dailyCapLeft = Math.max(0, DAILY_CALL_CAP - usedToday);
+  const estMinutes = Math.floor(balancePaise / RATE_PAISE_PER_MIN);
+
+  let allowed = true;
+  let reason: string | null = null;
+  let reasonCode: string | null = null;
+
+  if (dailyCapLeft <= 0) {
+    allowed = false;
+    reasonCode = 'DAILY_CAP_REACHED';
+    reason = `You have used all ${DAILY_CALL_CAP} masked calls for today.`;
+  } else if (balancePaise < RATE_PAISE_PER_MIN) {
+    allowed = false;
+    reasonCode = 'INSUFFICIENT_BALANCE';
+    reason = 'Add credit to place a masked call.';
+  }
+
+  return {
+    allowed,
+    reason,
+    reasonCode,
+    estRatePaise: RATE_PAISE_PER_MIN,
+    balancePaise,
+    estMinutes,
+    dailyCapLeft,
+    maskedNumber: activeNumber,
+  };
+}
+
+/**
+ * Forward a keypad tone to the live call (IVR menus, extensions). Only the
+ * caller on a connected call may send one.
+ */
+export async function sendDtmf(callerId: string, callId: string, digit: string) {
+  const call = await repo.findForCaller(callId, callerId);
+  if (!call) throw appError('NOT_FOUND', 'Call not found.');
+  if (call.status !== 'connected') {
+    throw appError('BAD_REQUEST', 'Tones can only be sent on a connected call.');
+  }
+  const telephony = getTelephonyProvider();
+  if (!call.providerRef || typeof telephony.sendDtmf !== 'function') {
+    // No provider support (or a mock): accept the tone so the UI stays
+    // responsive, but say plainly that it was not delivered.
+    return { sent: false, delivered: false, digit };
+  }
+  await telephony.sendDtmf(call.providerRef, digit);
+  return { sent: true, delivered: true, digit };
+}
+
 export async function markConnected(callerId: string, callId: string) {
   const call = await repo.findForCaller(callId, callerId);
   if (!call) throw appError('CALL_NOT_FOUND');

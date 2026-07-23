@@ -57,3 +57,12 @@ export const discoverQuery = z.object({
   q: z.string().trim().min(1).max(60),
   limit: z.coerce.number().int().min(1).max(50).default(20),
 });
+
+/**
+ * Contact matching. The client sends SHA-256 hashes of the phone numbers in
+ * its address book — never the numbers themselves — and gets back the accounts
+ * that opted into being discoverable.
+ */
+export const lookupByPhonesBody = z.object({
+  phoneHashes: z.array(z.string().trim().regex(/^[a-f0-9]{64}$/i)).min(1).max(500),
+});

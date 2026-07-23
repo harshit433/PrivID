@@ -66,3 +66,32 @@ export const completeBody = z.object({
 export const finishBody = z.object({
   referralCode: z.string().trim().min(1).max(32).optional(),
 });
+
+/**
+ * Appeal submission. Unauthenticated — a suspended/banned/ousted user has no
+ * token, so the subject comes from the onboarding session (preferred) or an
+ * explicitly supplied identity/user id.
+ */
+export const appealBody = z
+  .object({
+    sessionId: z.string().uuid().optional(),
+    identityId: z.string().uuid().optional(),
+    userId: z.string().uuid().optional(),
+    reason: z.string().trim().min(20).max(2000),
+    evidence: z.string().trim().max(4000).optional(),
+  })
+  .refine((b) => Boolean(b.sessionId || b.identityId || b.userId), {
+    message: 'Provide a session, identity or user id.',
+    path: ['sessionId'],
+  });
+
+/**
+ * Query keys stay snake_case: only request *bodies* are camel-cased by the app
+ * middleware, so query schemas here (see sessionIdQuery, handleCheckQuery)
+ * match the wire format directly.
+ */
+export const appealStatusQuery = z.object({
+  session_id: z.string().uuid().optional(),
+  identity_id: z.string().uuid().optional(),
+  user_id: z.string().uuid().optional(),
+});

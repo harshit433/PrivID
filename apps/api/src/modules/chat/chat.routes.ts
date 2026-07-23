@@ -4,7 +4,7 @@
  */
 import { Router, type Express, type Request } from 'express';
 import { asyncHandler, sendOk, validate, requireAuth, apiLimiter, publicLimiter } from '@trustroute/core';
-import { openChannelBody } from './chat.schema';
+import { openChannelBody, otherUserIdParam, messageIdParam } from './chat.schema';
 import * as chat from './chat.service';
 
 const router = Router();
@@ -30,6 +30,26 @@ router.post(
   asyncHandler(async (req, res) => {
     const target = req.valid.body as { handle?: string; otherUserId?: string };
     sendOk(res, await chat.openChannel(req.user!.sub, target), { status: 201 });
+  }),
+);
+
+/** Thread context: identity + permission gates for a 1:1 conversation. */
+router.get(
+  '/channels/:otherUserId/context',
+  validate({ params: otherUserIdParam }),
+  asyncHandler(async (req, res) => {
+    const { otherUserId } = req.valid.params as { otherUserId: string };
+    sendOk(res, await chat.context(req.user!.sub, otherUserId));
+  }),
+);
+
+/** Group admins (and authors) removing a message. Deletion happens in Stream. */
+router.delete(
+  '/messages/:messageId',
+  validate({ params: messageIdParam }),
+  asyncHandler(async (req, res) => {
+    const { messageId } = req.valid.params as { messageId: string };
+    sendOk(res, await chat.deleteMessage(req.user!.sub, messageId));
   }),
 );
 

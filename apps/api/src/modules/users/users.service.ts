@@ -200,3 +200,12 @@ export async function deleteAccount(userId: string) {
   await repo.softDeleteAccount(userId);
   return { deleted: true };
 }
+
+/**
+ * Address-book matching. Returns only accounts that chose to be discoverable;
+ * see repo.findByPhoneHashes for why private accounts are excluded.
+ */
+export async function lookupByPhones(hashes: string[], viewerId: string) {
+  const normalized = [...new Set(hashes.map((h) => h.toLowerCase()))];
+  return repo.findByPhoneHashes(normalized, viewerId);
+}

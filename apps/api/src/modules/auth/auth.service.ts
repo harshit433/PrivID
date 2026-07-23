@@ -88,7 +88,29 @@ export async function refresh(refreshToken: string) {
   return { accessToken, refreshToken: newRefresh, user: publicUser(u) };
 }
 
-export async function logout(userId: string): Promise<void> {
+/**
+ * Sign out one session. The app sends the refresh token of the device being
+ * signed out; revoking only that one leaves the user's other devices alone.
+ * Without a token we cannot tell which session to end, so we fall back to
+ * revoking everything — the safe direction to err in.
+ */
+export async function logout(userId: string, refreshToken?: string): Promise<void> {
+  if (!refreshToken) {
+    await authRepo.revokeAllForUser(userId);
+    return;
+  }
+  const stored = await authRepo.findActiveRefreshToken(hashToken(refreshToken));
+  // Only revoke a token that belongs to the caller — never let one user's
+  // logout revoke another user's session.
+  if (stored && stored.userId === userId) {
+    await authRepo.revokeToken(hashToken(refreshToken));
+    return;
+  }
+  await authRepo.revokeAllForUser(userId);
+}
+
+/** Sign out everywhere — every device, every refresh token. */
+export async function logoutAll(userId: string): Promise<void> {
   await authRepo.revokeAllForUser(userId);
 }
 

@@ -14,8 +14,10 @@ import {
   changeHandleBody,
   handleParam,
   discoverQuery,
+  lookupByPhonesBody,
 } from './users.schema';
 import * as users from './users.service';
+import * as business from '../business/business.service';
 
 const router = Router();
 router.use(requireAuth);
@@ -109,6 +111,31 @@ router.delete(
   '/me',
   asyncHandler(async (req, res) => {
     sendOk(res, await users.deleteAccount(req.user!.sub));
+  }),
+);
+
+/**
+ * Rotating counter QR for a user who owns a verified business. Placed with the
+ * other /me routes so it is matched before `/:handle`.
+ */
+router.get(
+  '/me/business-qr',
+  asyncHandler(async (req, res) => {
+    const channelId = req.query.channelId as string | undefined;
+    sendOk(res, await business.myCounterQr(req.user!.sub, channelId));
+  }),
+);
+
+/**
+ * Contact matching by hashed phone number. POST (not GET) so the hash list is
+ * never placed in a URL, where it would end up in access logs.
+ */
+router.post(
+  '/lookup-by-phones',
+  validate({ body: lookupByPhonesBody }),
+  asyncHandler(async (req, res) => {
+    const { phoneHashes } = req.valid.body as { phoneHashes: string[] };
+    sendOk(res, await users.lookupByPhones(phoneHashes, req.user!.sub));
   }),
 );
 

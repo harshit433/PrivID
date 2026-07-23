@@ -35,6 +35,10 @@ export const streamProvider: StreamProvider = {
     return getClient().createToken(userId);
   },
 
+  async deleteMessage(messageId: string, hard = false): Promise<void> {
+    await getClient().deleteMessage(messageId, hard);
+  },
+
   async upsertUser(user: StreamUserUpsert): Promise<void> {
     const sc = getClient();
     await sc.upsertUser({

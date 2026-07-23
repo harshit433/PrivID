@@ -210,3 +210,54 @@ export async function logBehavior(
 ): Promise<void> {
   await db.insert(behaviorEvents).values({ userId, eventType, targetUserId, metadata });
 }
+
+export interface PendingCallRow {
+  callId: string;
+  callType: CallRow['callType'];
+  status: CallRow['status'];
+  streamCallId: string | null;
+  createdAt: Date;
+  caller: {
+    userId: string;
+    handle: string;
+    displayName: string | null;
+    avatarUrl: string | null;
+    trustTier: (typeof users.$inferSelect)['trustTier'];
+    trustScore: number | null;
+  };
+}
+
+/**
+ * Calls currently ringing this user. Used as a fallback when a push was missed
+ * or the socket dropped, so the callee can still be shown the incoming call.
+ * Bounded by RING_WINDOW so a stale row can never resurrect a dead call.
+ */
+export async function listPendingForCallee(calleeId: string, withinSeconds = 60): Promise<PendingCallRow[]> {
+  return db
+    .select({
+      callId: calls.callId,
+      callType: calls.callType,
+      status: calls.status,
+      streamCallId: calls.streamCallId,
+      createdAt: calls.createdAt,
+      caller: {
+        userId: users.userId,
+        handle: users.handle,
+        displayName: users.displayName,
+        avatarUrl: users.avatarUrl,
+        trustTier: users.trustTier,
+        trustScore: users.trustScore,
+      },
+    })
+    .from(calls)
+    .innerJoin(users, eq(users.userId, calls.callerId))
+    .where(
+      and(
+        eq(calls.calleeId, calleeId),
+        sql`${calls.status} IN ('initiated','ringing')`,
+        sql`${calls.createdAt} > now() - make_interval(secs => ${withinSeconds})`,
+      ),
+    )
+    .orderBy(desc(calls.createdAt))
+    .limit(5);
+}

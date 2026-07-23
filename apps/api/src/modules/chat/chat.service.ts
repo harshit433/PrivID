@@ -56,6 +56,73 @@ export async function openChannel(userId: string, target: { handle?: string; oth
   };
 }
 
+/**
+ * What the thread screen needs to render its gates: who the other person is,
+ * the connection type in both directions, and whether sending is allowed.
+ * Messaging permission mirrors calling — allowed unless they blocked you.
+ */
+export async function context(userId: string, otherUserId: string) {
+  const other = await usersRepo.findById(otherUserId);
+  if (!other || other.accountStatus !== 'active') throw appError('HANDLE_NOT_FOUND');
+
+  const [mine, theirs, blocked] = await Promise.all([
+    connectionsRepo.findEdge(userId, otherUserId),
+    connectionsRepo.findEdge(otherUserId, userId),
+    connectionsRepo.isBlockedBy(userId, otherUserId),
+  ]);
+
+  const myConnectionType = mine?.connectionType ?? 'unknown';
+  const theirConnectionType = theirs?.connectionType ?? 'unknown';
+  const canSend = !blocked && myConnectionType !== 'blocked';
+
+  return {
+    otherUser: {
+      userId: other.userId,
+      handle: other.handle,
+      displayName: other.displayName ?? other.handle,
+      avatarUrl: other.avatarUrl,
+      trustTier: other.trustTier,
+      trustScore: other.trustScore,
+    },
+    myConnectionType,
+    theirConnectionType,
+    outgoing: {
+      canSend,
+      mode: theirConnectionType === 'trusted' ? 'open' : 'limited',
+      connectionType: theirConnectionType,
+      limit: null,
+      used: 0,
+      remaining: null,
+      code: canSend ? null : 'CHAT_NOT_ALLOWED',
+      reason: canSend ? null : 'You can no longer message this person.',
+    },
+    incoming: {
+      isUnknown: myConnectionType === 'unknown',
+      theirMessagesUsed: 0,
+      theirIntroRemaining: 0,
+    },
+  };
+}
+
+/**
+ * Remove a message from a group. Authorisation lives in Stream (it knows the
+ * channel roles); we only ensure the caller is a real, active user and that the
+ * provider can actually delete. The deletion is hard — a moderated message
+ * should not remain fetchable.
+ */
+export async function deleteMessage(userId: string, messageId: string) {
+  const me = await usersRepo.findById(userId);
+  if (!me || me.accountStatus !== 'active') throw appError('USER_INACTIVE');
+
+  const stream = getStreamProvider();
+  if (typeof stream.deleteMessage !== 'function') {
+    throw appError('NOT_CONFIGURED', 'Message deletion is unavailable right now.');
+  }
+  await stream.deleteMessage(messageId, true);
+  logger.info('chat', 'message deleted', { messageId, by: userId });
+  return { deleted: true, messageId };
+}
+
 export async function listChannels(userId: string) {
   return { channels: await repo.listChannels(userId) };
 }

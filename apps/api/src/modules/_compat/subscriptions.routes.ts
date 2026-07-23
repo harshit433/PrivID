@@ -72,9 +72,17 @@ router.get('/messages', asyncHandler(async (req, res) => {
   const { items, meta } = await biz.inbox(uid(req), 30, req.query.cursor as string | undefined);
   sendPage(res, items, meta);
 }));
-router.get('/', asyncHandler(async (req, res) => sendOk(res, await biz.directory(uid(req)))));
-router.get('/pending', asyncHandler(async (req, res) => sendOk(res, await biz.directory(uid(req)))));
-router.get('/blocked', asyncHandler(async (req, res) => sendOk(res, await biz.directory(uid(req)))));
+// These three used to all return `directory()` — a list of *businesses*, which
+// has no subscriptionId, so the app could not render or act on a subscription.
+const SUB_STATUS = new Set(['pending', 'active', 'paused', 'cancelled']);
+router.get('/', asyncHandler(async (req, res) => {
+  const q = req.query.status as string | undefined;
+  sendOk(res, await biz.mySubscriptions(uid(req), SUB_STATUS.has(q ?? '') ? (q as 'active') : undefined));
+}));
+router.get('/pending', asyncHandler(async (req, res) => sendOk(res, await biz.mySubscriptions(uid(req), 'pending'))));
+router.get('/blocked', asyncHandler(async (req, res) => sendOk(res, await biz.myBlocked(uid(req)))));
+/** The business catalogue, which `/` no longer serves. */
+router.get('/directory', asyncHandler(async (req, res) => sendOk(res, await biz.directory(uid(req)))));
 
 // Subscription-status changes on the caller's own subscription row.
 async function setStatus(userId: string, subscriptionId: string, patch: Record<string, unknown>) {

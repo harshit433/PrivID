@@ -103,6 +103,19 @@ export async function subscribe(userId: string, businessId: string, channelId: s
   return { subscriptionId: sub.subscriptionId, status: sub.status };
 }
 
+/**
+ * The user's own subscriptions. Distinct from `directory()`, which lists
+ * businesses: only these rows carry the `subscriptionId` that pause/resume/
+ * read/respond act on.
+ */
+export async function mySubscriptions(userId: string, status?: 'pending' | 'active' | 'paused' | 'cancelled') {
+  return { subscriptions: await repo.listSubscriptionsWithBusiness(userId, status) };
+}
+
+export async function myBlocked(userId: string) {
+  return { blocked: await repo.listBlockedBusinesses(userId) };
+}
+
 export async function unsubscribe(userId: string, subscriptionId: string) {
   if (!(await repo.unsubscribe(userId, subscriptionId))) throw appError('NOT_FOUND', 'Subscription not found.');
   return { unsubscribed: true };

@@ -147,6 +147,78 @@ export async function listUserSubscriptions(userId: string): Promise<Subscriptio
     .orderBy(desc(businessSubscriptions.subscribedAt));
 }
 
+export interface SubscriptionWithBusiness {
+  subscriptionId: string;
+  channelId: string;
+  status: SubscriptionRow['status'];
+  subscribedAt: Date | null;
+  cancelledAt: Date | null;
+  createdAt: Date;
+  lastReadAt: Date | null;
+  businessId: string;
+  businessName: string;
+  businessLogoUrl: string | null;
+  businessStatus: BusinessRow['status'];
+  verifiedHandle: string | null;
+  channelName: string;
+  channelType: ChannelRow['channelType'];
+}
+
+/**
+ * A user's subscriptions joined to their channel and business. The mobile app
+ * drives pause/resume/read/respond off `subscriptionId`, which the business
+ * directory does not carry — this is what /subscriptions must answer with.
+ */
+export async function listSubscriptionsWithBusiness(
+  userId: string,
+  status?: SubscriptionRow['status'],
+): Promise<SubscriptionWithBusiness[]> {
+  return db
+    .select({
+      subscriptionId: businessSubscriptions.subscriptionId,
+      channelId: businessSubscriptions.channelId,
+      status: businessSubscriptions.status,
+      subscribedAt: businessSubscriptions.subscribedAt,
+      cancelledAt: businessSubscriptions.cancelledAt,
+      createdAt: businessSubscriptions.createdAt,
+      lastReadAt: businessSubscriptions.lastReadAt,
+      businessId: businesses.businessId,
+      businessName: businesses.name,
+      businessLogoUrl: businesses.logoUrl,
+      businessStatus: businesses.status,
+      verifiedHandle: businesses.verifiedHandle,
+      channelName: businessChannels.name,
+      channelType: businessChannels.channelType,
+    })
+    .from(businessSubscriptions)
+    .innerJoin(businessChannels, eq(businessChannels.channelId, businessSubscriptions.channelId))
+    .innerJoin(businesses, eq(businesses.businessId, businessChannels.businessId))
+    .where(
+      status
+        ? and(eq(businessSubscriptions.userId, userId), eq(businessSubscriptions.status, status))
+        : eq(businessSubscriptions.userId, userId),
+    )
+    .orderBy(desc(businessSubscriptions.createdAt));
+}
+
+/** Businesses this user has blocked, with enough detail to render the list. */
+export async function listBlockedBusinesses(userId: string): Promise<
+  Array<{ businessId: string; name: string; logoUrl: string | null; verifiedHandle: string | null; blockedAt: Date }>
+> {
+  return db
+    .select({
+      businessId: businesses.businessId,
+      name: businesses.name,
+      logoUrl: businesses.logoUrl,
+      verifiedHandle: businesses.verifiedHandle,
+      blockedAt: businessBlocks.createdAt,
+    })
+    .from(businessBlocks)
+    .innerJoin(businesses, eq(businesses.businessId, businessBlocks.businessId))
+    .where(eq(businessBlocks.userId, userId))
+    .orderBy(desc(businessBlocks.createdAt));
+}
+
 /** Active subscribers of a channel who have NOT blocked the business. */
 export async function activeSubscribers(channelId: string, businessId: string): Promise<Array<{ subscriptionId: string; userId: string }>> {
   const blocked = db.select({ id: businessBlocks.userId }).from(businessBlocks).where(eq(businessBlocks.businessId, businessId));

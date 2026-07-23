@@ -148,8 +148,27 @@ export async function decline(userId: string, callId: string, reason?: string) {
   return { call: callView(updated) };
 }
 
-export async function end(userId: string, callId: string) {
-  await loadParticipant(callId, userId);
+export async function end(userId: string, callId: string, reason?: string) {
+  const call = await loadParticipant(callId, userId);
+
+  // The app ends every call through this route and distinguishes the outcome
+  // by `reason`. Ignoring it stored a decline and an unanswered ring both as
+  // 'ended', so the call log rendered a decline as "Missed call".
+  if (call.status === 'initiated' || call.status === 'ringing') {
+    if (reason === 'declined') {
+      const declined = await repo.markDeclined(callId, null);
+      if (declined) {
+        await repo.logBehavior(userId, 'call_declined', call.callerId, { callId });
+        return { call: callView(declined) };
+      }
+    } else if (reason === 'missed' || reason === 'cancelled') {
+      if (await repo.markMissedIfUnanswered(callId)) {
+        const missed = await repo.findById(callId);
+        if (missed) return { call: callView(missed) };
+      }
+    }
+  }
+
   const updated = await repo.markEnded(callId);
   if (!updated) {
     // Already terminal — return the current state idempotently.
@@ -181,5 +200,25 @@ export async function history(
 
 export async function get(userId: string, callId: string) {
   const call = await loadParticipant(callId, userId);
-  return { call: callView(call) };
+  // callView alone has no counterpart and no viewer-relative direction, so the
+  // detail screen rendered "? @", 0s and always "incoming". Enrich it the same
+  // way history does.
+  const outgoing = call.callerId === userId;
+  const other = await usersRepo.findById(outgoing ? call.calleeId : call.callerId);
+  return {
+    call: {
+      ...callView(call),
+      direction: outgoing ? 'outgoing' : 'incoming',
+      counterpart: other
+        ? {
+            userId: other.userId,
+            handle: other.handle,
+            displayName: other.displayName,
+            avatarUrl: other.avatarUrl,
+            trustTier: other.trustTier,
+            trustScore: other.trustScore,
+          }
+        : null,
+    },
+  };
 }

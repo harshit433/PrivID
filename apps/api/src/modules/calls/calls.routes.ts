@@ -5,7 +5,7 @@
  */
 import { Router, type Express, type Request, type Response } from 'express';
 import { asyncHandler, sendOk, sendPage, validate, requireAuth, apiLimiter, idempotency } from '@trustroute/core';
-import { initiateBody, prepareStreamBody, declineBody, qualityBody, listQuery, callIdParam } from './calls.schema';
+import { initiateBody, prepareStreamBody, declineBody, endBody, qualityBody, listQuery, callIdParam } from './calls.schema';
 import * as calls from './calls.service';
 
 const router = Router();
@@ -85,10 +85,11 @@ router.post(
 
 router.post(
   '/:callId/end',
-  validate({ params: callIdParam }),
+  validate({ params: callIdParam, body: endBody }),
   asyncHandler(async (req, res) => {
     const { callId } = req.valid.params as { callId: string };
-    sendOk(res, await calls.end(req.user!.sub, callId));
+    const { reason } = req.valid.body as { reason?: string };
+    sendOk(res, await calls.end(req.user!.sub, callId, reason));
   }),
 );
 

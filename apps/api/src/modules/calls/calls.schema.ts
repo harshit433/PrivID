@@ -34,6 +34,9 @@ export const prepareStreamBody = z
 
 export const declineBody = z.object({ reason: z.string().trim().max(120).optional() });
 
+/** The app reports how a call finished here: 'declined' | 'missed' | 'cancelled' | 'ended'. */
+export const endBody = z.object({ reason: z.string().trim().max(40).optional() });
+
 export const qualityBody = z.object({
   mosScore: z.number().min(0).max(5).optional(),
   packetLossPct: z.number().min(0).max(100).optional(),

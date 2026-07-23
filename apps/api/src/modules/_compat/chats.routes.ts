@@ -16,8 +16,8 @@ const uid = (req: { user?: { sub: string } }) => req.user!.sub;
 router.get('/', asyncHandler(async (req, res) => sendOk(res, await chat.listChannels(uid(req)))));
 router.get('/token', asyncHandler(async (req, res) => sendOk(res, await chat.getToken(uid(req)))));
 router.post('/open', asyncHandler(async (req, res) => {
-  const { handle } = (req.body ?? {}) as { handle: string };
-  sendOk(res, await chat.openChannel(uid(req), handle));
+  const { handle, otherUserId } = (req.body ?? {}) as { handle?: string; otherUserId?: string };
+  sendOk(res, await chat.openChannel(uid(req), { handle, otherUserId }));
 }));
 
 // Message traffic is Stream-direct in v2 — the client uses the Stream SDK, not the API.

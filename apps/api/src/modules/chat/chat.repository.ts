@@ -3,14 +3,25 @@
  * registry: the deterministic 1:1 channel record (sorted member pair → stable cid) and
  * an append-only message log that backs auditing + abuse signals.
  */
+import crypto from 'node:crypto';
 import { db, chatChannels, chatMessageLog, users, eq, and, or, sql, desc } from '@trustroute/core';
 
 export type ChannelRow = typeof chatChannels.$inferSelect;
 
-/** Deterministic channel id for a member pair: order-independent. */
+/**
+ * Deterministic channel id for a member pair: order-independent.
+ *
+ * The id is a hash of the sorted pair, not the pair itself. Stream caps a
+ * channel id at 64 characters and `<uuid>__<uuid>` is 74, so the literal form
+ * made every 1:1 `getOrCreateChannel` fail with a 400. The hash is stable for
+ * a given pair, so the cid stays derivable without a lookup — but it is no
+ * longer reversible, so members come from the `chat_channels` row (see
+ * `findByCid`) rather than from splitting the string.
+ */
 export function pairCid(a: string, b: string): { cid: string; low: string; high: string } {
   const [low, high] = a < b ? [a, b] : [b, a];
-  return { cid: `messaging:${low}__${high}`, low, high };
+  const digest = crypto.createHash('sha256').update(`${low}__${high}`).digest('hex').slice(0, 40);
+  return { cid: `messaging:dm-${digest}`, low, high };
 }
 
 export async function ensureChannel(a: string, b: string): Promise<ChannelRow> {
@@ -18,11 +29,32 @@ export async function ensureChannel(a: string, b: string): Promise<ChannelRow> {
   const [row] = await db
     .insert(chatChannels)
     .values({ channelCid: cid, memberLow: low, memberHigh: high })
-    .onConflictDoNothing({ target: chatChannels.channelCid })
+    // The pair is uniquely indexed too, so a row written under the old
+    // long-form cid must not resurface as a duplicate-pair insert failure.
+    .onConflictDoNothing()
     .returning();
   if (row) return row;
-  const [existing] = await db.select().from(chatChannels).where(eq(chatChannels.channelCid, cid)).limit(1);
+  const [existing] = await db
+    .select()
+    .from(chatChannels)
+    .where(and(eq(chatChannels.memberLow, low), eq(chatChannels.memberHigh, high)))
+    .limit(1);
+  if (existing && existing.channelCid !== cid) {
+    // Migrate a pre-hash row onto the new cid in place, preserving its history.
+    const [moved] = await db
+      .update(chatChannels)
+      .set({ channelCid: cid, updatedAt: sql`now()` })
+      .where(and(eq(chatChannels.memberLow, low), eq(chatChannels.memberHigh, high)))
+      .returning();
+    if (moved) return moved;
+  }
   return existing!;
+}
+
+/** Look up a 1:1 channel by cid. Members are no longer encoded in the id. */
+export async function findByCid(cid: string): Promise<ChannelRow | null> {
+  const [row] = await db.select().from(chatChannels).where(eq(chatChannels.channelCid, cid)).limit(1);
+  return row ?? null;
 }
 
 export interface ChannelWithCounterpart {

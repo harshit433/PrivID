@@ -28,8 +28,8 @@ router.post(
   '/channels',
   validate({ body: openChannelBody }),
   asyncHandler(async (req, res) => {
-    const { handle } = req.valid.body as { handle: string };
-    sendOk(res, await chat.openChannel(req.user!.sub, handle), { status: 201 });
+    const target = req.valid.body as { handle?: string; otherUserId?: string };
+    sendOk(res, await chat.openChannel(req.user!.sub, target), { status: 201 });
   }),
 );
 

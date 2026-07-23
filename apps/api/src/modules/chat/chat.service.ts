@@ -31,8 +31,10 @@ export async function getToken(userId: string) {
   };
 }
 
-export async function openChannel(userId: string, handle: string) {
-  const other = await usersRepo.findByHandle(handle);
+export async function openChannel(userId: string, target: { handle?: string; otherUserId?: string }) {
+  const other = target.otherUserId
+    ? await usersRepo.findById(target.otherUserId)
+    : await usersRepo.findByHandle(target.handle!);
   if (!other || other.accountStatus !== 'active') throw appError('HANDLE_NOT_FOUND');
   if (other.userId === userId) throw appError('BAD_REQUEST', 'You cannot message yourself.');
   if (await connectionsRepo.isBlockedBy(userId, other.userId)) throw appError('CHAT_NOT_ALLOWED');
@@ -76,11 +78,17 @@ export async function handleWebhook(rawBody: Buffer | string, signature: string,
     return { handled: false };
   }
 
-  // Derive recipient from the deterministic 1:1 cid (messaging:<low>__<high>).
+  // The cid is a hash of the member pair, so the recipient comes from the
+  // channel row rather than from splitting the id.
   const senderId = event.message.user.id;
-  const pair = event.cid.replace(/^messaging:/, '').split('__');
-  const recipientId = pair.find((id) => id !== senderId);
-  if (pair.length === 2 && recipientId) {
+  const channel = await repo.findByCid(event.cid);
+  if (!channel) {
+    // Group channels have no chat_channels row; nothing to log against.
+    logger.debug('chat', 'no 1:1 channel for cid', { cid: event.cid });
+    return { handled: true };
+  }
+  const recipientId = channel.memberLow === senderId ? channel.memberHigh : channel.memberLow;
+  if (recipientId && recipientId !== senderId) {
     await repo.logMessage({ messageId: event.message.id, channelCid: event.cid, senderId, recipientId });
     await repo.touchChannel(event.cid);
     logger.debug('chat', 'message logged', { cid: event.cid });

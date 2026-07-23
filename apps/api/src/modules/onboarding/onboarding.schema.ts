@@ -61,3 +61,8 @@ export const completeBody = z.object({
   displayName: z.string().trim().min(1).max(80).optional(),
   handle: handleSchema.optional(),
 });
+
+/** Final signup step (authenticated). Body may be empty — referral is optional. */
+export const finishBody = z.object({
+  referralCode: z.string().trim().min(1).max(32).optional(),
+});

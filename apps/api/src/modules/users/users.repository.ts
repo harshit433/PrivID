@@ -121,6 +121,16 @@ export async function updateProfile(userId: string, patch: ProfilePatch): Promis
   return row!;
 }
 
+/** Flip the account to onboarding-complete (the final signup step). Idempotent. */
+export async function markOnboardingComplete(userId: string): Promise<UserRow> {
+  const [row] = await db
+    .update(users)
+    .set({ onboardingComplete: true, updatedAt: sql`now()` })
+    .where(eq(users.userId, userId))
+    .returning();
+  return row!;
+}
+
 export async function setAvatar(userId: string, avatarUrl: string | null): Promise<UserRow> {
   const [row] = await db
     .update(users)

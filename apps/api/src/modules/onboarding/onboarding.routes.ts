@@ -3,7 +3,7 @@
  * account yet); a session id threads the steps together and completion returns tokens.
  */
 import { Router, type Express } from 'express';
-import { asyncHandler, sendOk, validate, publicLimiter } from '@trustroute/core';
+import { asyncHandler, sendOk, validate, publicLimiter, requireAuth } from '@trustroute/core';
 import {
   startBody,
   sessionBody,
@@ -14,6 +14,7 @@ import {
   sessionIdQuery,
   setHandleBody,
   completeBody,
+  finishBody,
 } from './onboarding.schema';
 import * as onboarding from './onboarding.service';
 import { digilockerReturnRouter } from './digilocker.return';
@@ -139,6 +140,18 @@ router.post(
       displayName?: string;
     };
     sendOk(res, await onboarding.complete(sessionId, pin, displayName), { status: 201 });
+  }),
+);
+
+// Authenticated, unlike the rest of this router: by this point `/complete` has
+// already minted tokens, and we need to know which account to finish.
+router.post(
+  '/finish',
+  requireAuth,
+  validate({ body: finishBody }),
+  asyncHandler(async (req, res) => {
+    const { referralCode } = req.valid.body as { referralCode?: string };
+    sendOk(res, await onboarding.finish(req.user!.sub, referralCode));
   }),
 );
 

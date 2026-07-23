@@ -24,6 +24,7 @@ import { computeNextStep } from './onboarding.progress';
 import { classify } from '../identity/identity.service';
 import type { IdentityBranch } from '../identity/identity.service';
 import * as usersRepo from '../users/users.repository';
+import * as referrals from '../referrals/referrals.service';
 import { issueSession, publicUser } from '../auth/auth.service';
 import {
   buildHandleCandidates,
@@ -255,6 +256,35 @@ export async function match(sessionId: string) {
     selfieB64: null,
   });
   return enrichView(updated);
+}
+
+/**
+ * Final signup step, called once the client already holds tokens: apply an
+ * optional referral code and flip the account to onboarding-complete.
+ *
+ * The referral is best-effort — an invalid or already-used code must never strand
+ * someone on the last screen of signup, so it's logged and skipped. Marking the
+ * account complete is idempotent, so a client retry is safe.
+ */
+export async function finish(userId: string, referralCode?: string) {
+  const user = await usersRepo.findById(userId);
+  if (!user) throw appError('USER_INACTIVE');
+
+  if (referralCode) {
+    try {
+      await referrals.apply(userId, referralCode);
+    } catch (err) {
+      logger.warn('onboarding', 'referral code not applied', {
+        userId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  const updated = user.onboardingComplete
+    ? user
+    : await usersRepo.markOnboardingComplete(userId);
+  return { user: publicUser(updated) };
 }
 
 export async function checkHandle(handle: string) {
